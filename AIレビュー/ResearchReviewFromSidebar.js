@@ -29,18 +29,10 @@ function addResearchReviewMenu_(ui) {
 }
 
 /**
- * 既存onOpenがない場合だけ使う。
- * 既にonOpenがあるなら、そこに addResearchReviewMenu_(); を追加すること。
- */
-function onOpen(e) {
-  addResearchReviewMenu_();
-}
-
-/**
  * サイドバー表示
  */
 function showResearchReviewSidebar() {
-  var tmpl = HtmlService.createTemplateFromFile('ResearchReviewSidebar');
+  var tmpl = HtmlService.createTemplateFromFile('AIレビュー/ResearchReviewSidebar');
   tmpl.defaultsJson = JSON.stringify(RESEARCH_REVIEW_DEFAULT_OPTIONS);
 
   var html = tmpl.evaluate()

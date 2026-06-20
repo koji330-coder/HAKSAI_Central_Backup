@@ -41,6 +41,8 @@ function onOpen() {
         .addItem('🧾 AI相談新商品相談カルテ生成', 'addResearchReviewMenu')
     )
     .addToUi();
+
+  addResearchReviewMenu_();
 }
 
 function showManualSidebar() {
