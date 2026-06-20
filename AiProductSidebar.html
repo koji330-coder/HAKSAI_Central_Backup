@@ -1,0 +1,313 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <base target="_top">
+  <style>
+    body {
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Noto Sans JP", sans-serif;
+      padding: 14px;
+      color: #222;
+      font-size: 13px;
+    }
+    h2 {
+      font-size: 16px;
+      margin: 0 0 12px;
+    }
+    input, select, button, textarea {
+      width: 100%;
+      box-sizing: border-box;
+      font-size: 13px;
+      padding: 8px;
+      margin: 5px 0 10px;
+    }
+    button {
+      cursor: pointer;
+      border: 0;
+      border-radius: 6px;
+      background: #1a73e8;
+      color: #fff;
+      font-weight: 700;
+    }
+    button.secondary {
+      background: #555;
+    }
+    button:disabled {
+      opacity: .5;
+      cursor: not-allowed;
+    }
+    .row {
+      border: 1px solid #ddd;
+      border-radius: 8px;
+      padding: 8px;
+      margin: 8px 0;
+      cursor: pointer;
+      background: #fafafa;
+    }
+    .row:hover {
+      background: #eef4ff;
+    }
+    .row.selected {
+      border-color: #1a73e8;
+      background: #e8f0fe;
+    }
+    .title {
+      font-weight: 700;
+      line-height: 1.4;
+      margin-bottom: 4px;
+    }
+    .meta {
+      font-size: 11px;
+      color: #666;
+      line-height: 1.5;
+      word-break: break-all;
+    }
+    .note {
+      font-size: 11px;
+      color: #777;
+      line-height: 1.6;
+      margin-bottom: 10px;
+    }
+    .status {
+      font-size: 12px;
+      padding: 8px;
+      background: #f6f6f6;
+      border-radius: 6px;
+      margin: 8px 0;
+      white-space: pre-wrap;
+    }
+    .link {
+      display: block;
+      margin-top: 8px;
+      word-break: break-all;
+    }
+    textarea {
+      height: 180px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 11px;
+    }
+    label {
+      display: block;
+      margin: 8px 0 2px;
+      font-weight: 700;
+    }
+    .checkrow {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      margin: 6px 0 10px;
+    }
+    .checkrow input {
+      width: auto;
+      margin: 0;
+    }
+  </style>
+</head>
+<body>
+  <h2>🧾 AI相談カルテ生成</h2>
+
+  <div class="note">
+    商品名・ASIN・SKU・FNSKUで検索できます。<br>
+    もうコードにASINを直書きしなくていいです。石板から卒業です。
+  </div>
+
+  <label>検索</label>
+  <input id="searchInput" type="text" placeholder="例：バイクカバー / B0FS7M89XY / SKU" onkeydown="if(event.key==='Enter') searchProducts()">
+  <button onclick="searchProducts()">検索</button>
+
+  <div id="results"></div>
+
+  <label>選択中</label>
+  <input id="selectedQuery" type="text" placeholder="検索結果をクリック、または直接ASIN/SKU入力">
+
+  <label>対象期間</label>
+  <select id="periodMonths">
+    <option value="3">直近3か月</option>
+    <option value="6" selected>直近6か月</option>
+    <option value="12">直近12か月</option>
+  </select>
+
+  <div class="checkrow">
+    <input id="includeVariations" type="checkbox" checked>
+    <span>バリエーションを含める</span>
+  </div>
+
+  <div class="checkrow">
+    <input id="writeToDrive" type="checkbox" checked>
+    <span>DriveにMarkdown保存</span>
+  </div>
+
+  <button id="generateBtn" onclick="generate()">カルテ生成</button>
+
+  <button class="secondary" onclick="createMissingCostCandidates()">原価補完候補シートを作成</button>
+
+  <div id="status" class="status">待機中</div>
+  <a id="fileLink" class="link" href="#" target="_blank" style="display:none;">生成ファイルを開く</a>
+
+  <label>Markdownプレビュー</label>
+  <textarea id="markdownPreview" readonly></textarea>
+  <button class="secondary" onclick="copyMarkdown()">Markdownをコピー</button>
+
+<script>
+  let selectedEl = null;
+
+  function setStatus(msg) {
+    document.getElementById('status').textContent = msg;
+  }
+
+  function searchProducts() {
+    const q = document.getElementById('searchInput').value.trim();
+    if (!q) {
+      setStatus('検索語を入れてください。');
+      return;
+    }
+
+    setStatus('検索中...');
+    document.getElementById('results').innerHTML = '';
+
+    google.script.run
+      .withSuccessHandler(renderResults)
+      .withFailureHandler(err => setStatus('検索失敗：' + err.message))
+      .searchProductsForAiExportSidebar(q);
+  }
+
+  function renderResults(rows) {
+    const box = document.getElementById('results');
+
+    if (!rows || !rows.length) {
+      box.innerHTML = '<div class="note">該当なし。ASINかSKUで直接入れてもOKです。</div>';
+      setStatus('該当なし');
+      return;
+    }
+
+    box.innerHTML = rows.map((r, i) => `
+      <div class="row" onclick="selectResult(${i})" id="result-${i}">
+        <div class="title">${escapeHtml(r.title || '(無題)')}</div>
+        <div class="meta">
+          subtitle: ${escapeHtml(r.subtitle || '')}<br>
+          ASIN: ${escapeHtml(r.asin || '')}<br>
+          parent: ${escapeHtml(r.parent_asin || '')}<br>
+          SKU: ${escapeHtml(r.sku || '')}<br>
+          在庫: ${escapeHtml(r.fba_stock || '')} / ${escapeHtml(r.fba_alert || '')}
+        </div>
+        <input type="hidden" id="q-${i}" value="${escapeAttr(r.queryValue || '')}">
+      </div>
+    `).join('');
+
+    setStatus(`${rows.length}件見つかりました。対象をクリックしてください。`);
+  }
+
+  function selectResult(i) {
+    if (selectedEl) selectedEl.classList.remove('selected');
+    selectedEl = document.getElementById(`result-${i}`);
+    selectedEl.classList.add('selected');
+
+    const q = document.getElementById(`q-${i}`).value;
+    document.getElementById('selectedQuery').value = q;
+    setStatus(`選択：${q}`);
+  }
+
+  function generate() {
+    const query = document.getElementById('selectedQuery').value.trim();
+
+    if (!query) {
+      setStatus('対象商品を選択するか、ASIN/SKUを入力してください。');
+      return;
+    }
+
+    const btn = document.getElementById('generateBtn');
+    btn.disabled = true;
+
+    document.getElementById('fileLink').style.display = 'none';
+    document.getElementById('markdownPreview').value = '';
+
+    setStatus('カルテ生成中... ちょっと待ってください。スプレッドシートが汗をかいています。');
+
+    const form = {
+      query,
+      periodMonths: document.getElementById('periodMonths').value,
+      includeVariations: document.getElementById('includeVariations').checked,
+      writeToDrive: document.getElementById('writeToDrive').checked,
+    };
+
+    google.script.run
+      .withSuccessHandler(res => {
+        btn.disabled = false;
+        setStatus(
+          `生成完了\n` +
+          `商品数: ${res.matchedProductCount}\n` +
+          `ASIN数: ${res.matchedAsinCount}\n` +
+          `SKU数: ${res.matchedSkuCount}`
+        );
+
+        document.getElementById('markdownPreview').value = res.markdown || '';
+
+        if (res.fileUrl) {
+          const a = document.getElementById('fileLink');
+          a.href = res.fileUrl;
+          a.style.display = 'block';
+        }
+      })
+      .withFailureHandler(err => {
+        btn.disabled = false;
+        setStatus('生成失敗：' + err.message);
+      })
+      .generateProductAiMarkdownFromSidebar(form);
+  }
+
+  function copyMarkdown() {
+    const text = document.getElementById('markdownPreview').value;
+    if (!text) {
+      setStatus('コピーするMarkdownがありません。');
+      return;
+    }
+
+    navigator.clipboard.writeText(text)
+      .then(() => setStatus('Markdownをコピーしました。'))
+      .catch(() => setStatus('コピーに失敗しました。'));
+  }
+
+  function escapeHtml(s) {
+    return String(s || '')
+      .replaceAll('&', '&amp;')
+      .replaceAll('<', '&lt;')
+      .replaceAll('>', '&gt;')
+      .replaceAll('"', '&quot;')
+      .replaceAll("'", '&#039;');
+  }
+
+  function escapeAttr(s) {
+    return escapeHtml(s).replaceAll('\n', ' ');
+  }
+
+  function createMissingCostCandidates() {
+  const query = document.getElementById('selectedQuery').value.trim();
+
+  if (!query) {
+    setStatus('対象商品を選択するか、ASIN/SKUを入力してください。');
+    return;
+  }
+
+  setStatus('原価補完候補を作成中... スプレッドシートがまた汗をかいています。かわいそうに。');
+
+  const form = {
+    query,
+    periodMonths: document.getElementById('periodMonths').value,
+    includeVariations: document.getElementById('includeVariations').checked,
+  };
+
+  google.script.run
+    .withSuccessHandler(res => {
+      setStatus(
+        `原価補完候補を作成しました。\n` +
+        `候補数: ${res.candidateCount}\n` +
+        `シート: ${res.sheetName}`
+      );
+    })
+    .withFailureHandler(err => {
+      setStatus('原価補完候補の作成に失敗：' + err.message);
+    })
+    .exportMissingLandedCostFixCandidatesFromSidebar(form);
+}
+</script>
+</body>
+</html>

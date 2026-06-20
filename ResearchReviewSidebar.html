@@ -1,0 +1,359 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <base target="_top">
+  <style>
+    :root {
+      --bg: #0c0c0e;
+      --surface: #17171b;
+      --surface2: #202027;
+      --border: rgba(255,255,255,0.12);
+      --text: #eeede6;
+      --muted: #96938a;
+      --accent: #e8d5a3;
+      --blue: #4a8fd4;
+      --green: #1a9e6e;
+      --red: #c04848;
+      --font: system-ui, -apple-system, BlinkMacSystemFont, "Noto Sans JP", sans-serif;
+      --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      padding: 14px;
+      background: var(--bg);
+      color: var(--text);
+      font-family: var(--font);
+      font-size: 13px;
+      line-height: 1.6;
+    }
+
+    h1 {
+      font-size: 16px;
+      margin: 0 0 4px;
+      color: var(--accent);
+      letter-spacing: 0.04em;
+    }
+
+    .lead {
+      color: var(--muted);
+      font-size: 12px;
+      margin-bottom: 14px;
+    }
+
+    .section {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 12px;
+      margin-bottom: 12px;
+    }
+
+    .section-title {
+      font-size: 11px;
+      color: var(--accent);
+      font-weight: 700;
+      margin-bottom: 10px;
+      letter-spacing: 0.05em;
+    }
+
+    label {
+      display: block;
+      font-size: 11px;
+      color: var(--muted);
+      font-weight: 700;
+      margin-bottom: 5px;
+    }
+
+    input[type="number"],
+    select {
+      width: 100%;
+      background: var(--surface2);
+      color: var(--text);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 8px 10px;
+      font-size: 13px;
+      outline: none;
+    }
+
+    input[type="number"]:focus,
+    select:focus {
+      border-color: var(--accent);
+    }
+
+    .field {
+      margin-bottom: 12px;
+    }
+
+    .field:last-child {
+      margin-bottom: 0;
+    }
+
+    .hint {
+      font-size: 10px;
+      color: var(--muted);
+      margin-top: 4px;
+    }
+
+    .check {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin: 8px 0;
+      color: var(--text);
+      font-size: 12px;
+    }
+
+    .check input {
+      accent-color: var(--accent);
+    }
+
+    button {
+      width: 100%;
+      border: none;
+      border-radius: 10px;
+      padding: 11px 12px;
+      font-weight: 700;
+      cursor: pointer;
+      font-size: 13px;
+      font-family: var(--font);
+    }
+
+    .btn-primary {
+      background: var(--accent);
+      color: #0c0c0e;
+    }
+
+    .btn-secondary {
+      background: var(--surface2);
+      color: var(--muted);
+      border: 1px solid var(--border);
+      margin-top: 8px;
+    }
+
+    button:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+    }
+
+    .status {
+      padding: 10px;
+      border-radius: 10px;
+      background: var(--surface2);
+      color: var(--muted);
+      font-size: 12px;
+      margin-top: 10px;
+      white-space: pre-wrap;
+    }
+
+    .status.ok {
+      color: var(--green);
+      border: 1px solid rgba(26,158,110,0.25);
+      background: rgba(26,158,110,0.08);
+    }
+
+    .status.err {
+      color: #e06060;
+      border: 1px solid rgba(192,72,72,0.25);
+      background: rgba(192,72,72,0.08);
+    }
+
+    .link {
+      display: block;
+      color: var(--blue);
+      text-decoration: none;
+      font-size: 12px;
+      margin-top: 8px;
+      overflow-wrap: anywhere;
+    }
+
+    textarea {
+      width: 100%;
+      height: 220px;
+      background: #111115;
+      color: var(--text);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 10px;
+      font-family: var(--mono);
+      font-size: 11px;
+      line-height: 1.5;
+      resize: vertical;
+      margin-top: 10px;
+    }
+
+    .row {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 8px;
+    }
+  </style>
+</head>
+
+<body>
+  <h1>商品化候補レビュー</h1>
+  <div class="lead">
+    販売中商品は全件台帳ではなく、勝ち筋・在庫リスク・注目商品だけを抜粋します。やっとMarkdownが痩せます。
+  </div>
+
+  <div class="section">
+    <div class="section-title">出力設定</div>
+
+    <div class="field">
+      <label for="mode">出力モード</label>
+      <select id="mode">
+        <option value="compact">compact：外部AI相談用</option>
+        <option value="full">full：全データ確認用</option>
+      </select>
+      <div class="hint">通常はcompact推奨。fullは巻物です。</div>
+    </div>
+
+    <div class="field">
+      <label for="periodMonths">集計期間（月）</label>
+      <input type="number" id="periodMonths" min="1" max="24" step="1">
+      <div class="hint">例：3 / 6 / 12</div>
+    </div>
+
+    <div class="row">
+      <div class="field">
+        <label for="topSellingLimit">販売中 上位件数</label>
+        <input type="number" id="topSellingLimit" min="3" max="50" step="1">
+      </div>
+
+      <div class="field">
+        <label for="topResearchDetailLimit">アイデア詳細件数</label>
+        <input type="number" id="topResearchDetailLimit" min="3" max="100" step="1">
+      </div>
+    </div>
+  </div>
+
+  <div class="section">
+    <div class="section-title">含める情報</div>
+
+    <label class="check">
+      <input type="checkbox" id="includeStockRisk">
+      在庫リスク商品を含める
+    </label>
+
+    <label class="check">
+      <input type="checkbox" id="includeWeakProducts">
+      低迷・販売弱い商品を含める
+    </label>
+
+    <label class="check">
+      <input type="checkbox" id="writeToDrive">
+      DriveにMarkdown保存
+    </label>
+  </div>
+
+  <button class="btn-primary" id="runBtn" onclick="runGenerate()">
+    🧠 Markdownを生成
+  </button>
+
+  <button class="btn-secondary" onclick="resetDefaults()">
+    初期値に戻す
+  </button>
+
+  <div id="status" class="status" style="display:none;"></div>
+  <a id="fileLink" class="link" href="#" target="_blank" style="display:none;">Driveで開く</a>
+  <textarea id="preview" readonly style="display:none;"></textarea>
+
+  <script>
+    const DEFAULTS = <?!= defaultsJson ?>;
+
+    function $(id) {
+      return document.getElementById(id);
+    }
+
+    function resetDefaults() {
+      $('mode').value = DEFAULTS.mode || 'compact';
+      $('periodMonths').value = DEFAULTS.periodMonths || 3;
+      $('topSellingLimit').value = DEFAULTS.topSellingLimit || 10;
+      $('topResearchDetailLimit').value = DEFAULTS.topResearchDetailLimit || 10;
+      $('writeToDrive').checked = DEFAULTS.writeToDrive !== false;
+      $('includeStockRisk').checked = DEFAULTS.includeStockRisk !== false;
+      $('includeWeakProducts').checked = DEFAULTS.includeWeakProducts !== false;
+      setStatus('', '');
+      $('fileLink').style.display = 'none';
+      $('preview').style.display = 'none';
+      $('preview').value = '';
+    }
+
+    function collectForm() {
+      return {
+        mode: $('mode').value,
+        periodMonths: Number($('periodMonths').value || 3),
+        topSellingLimit: Number($('topSellingLimit').value || 10),
+        topResearchDetailLimit: Number($('topResearchDetailLimit').value || 10),
+        writeToDrive: $('writeToDrive').checked,
+        includeStockRisk: $('includeStockRisk').checked,
+        includeWeakProducts: $('includeWeakProducts').checked
+      };
+    }
+
+    function runGenerate() {
+      const btn = $('runBtn');
+      btn.disabled = true;
+      btn.textContent = '生成中...';
+
+      setStatus('Markdown生成中です。少し待ってください。GASが今、書類の山を掘っています。', '');
+      $('fileLink').style.display = 'none';
+      $('preview').style.display = 'none';
+
+      google.script.run
+        .withSuccessHandler(function(res) {
+          btn.disabled = false;
+          btn.textContent = '🧠 Markdownを生成';
+
+          setStatus(
+            '生成完了\n' +
+            'モード: ' + res.mode + '\n' +
+            '集計期間: ' + res.periodMonths + 'ヶ月\n' +
+            '販売中上位: ' + res.topSellingLimit + '件\n' +
+            'アイデア詳細: ' + res.topResearchDetailLimit + '件\n' +
+            '文字数: ' + Number(res.charCount || 0).toLocaleString() + '字',
+            'ok'
+          );
+
+          if (res.fileUrl) {
+            $('fileLink').href = res.fileUrl;
+            $('fileLink').textContent = '生成ファイルをDriveで開く';
+            $('fileLink').style.display = 'block';
+          }
+
+          if (res.preview) {
+            $('preview').value = res.preview;
+            $('preview').style.display = 'block';
+          }
+        })
+        .withFailureHandler(function(err) {
+          btn.disabled = false;
+          btn.textContent = '🧠 Markdownを生成';
+          setStatus('エラー:\n' + (err.message || err), 'err');
+        })
+        .generateResearchReviewFromSidebar(collectForm());
+    }
+
+    function setStatus(msg, type) {
+      const el = $('status');
+      if (!msg) {
+        el.style.display = 'none';
+        el.className = 'status';
+        el.textContent = '';
+        return;
+      }
+
+      el.style.display = 'block';
+      el.className = 'status' + (type ? ' ' + type : '');
+      el.textContent = msg;
+    }
+
+    window.addEventListener('load', resetDefaults);
+  </script>
+</body>
+</html>
