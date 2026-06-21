@@ -202,6 +202,10 @@ function doGet(e) {
       return jsonResponse({ status: 'ok', periods: getAvailablePeriods() });
     }
 
+    if (action === 'getInventoryAlerts') {
+      return jsonResponse({ status: 'ok', data: getInventoryAlerts() });
+    }
+
     if (action === 'debugLastInventory') {
       const ss = getSpreadsheet_();
       const sheet = ss.getSheetByName('sku_master');
@@ -356,9 +360,9 @@ function doPost(e) {
     }
 
       if (action === 'syncInventory') {
-    const result = syncInventoryFromReport(body.inventoryData || []);
+    const result = syncInventoryFromReport(body.inventoryData || [], body.snapshotDate || '')
     return jsonResponse({ status: 'ok', data: result });
-  }
+    }
 
       // doPost内に追加
     if (action === 'updateReorderRecord') {
@@ -394,6 +398,11 @@ function doPost(e) {
 
     if (action === 'syncBusinessReport') {
           return jsonResponse({ status:'ok', data: syncBusinessReport(body.rows||[], body.dateFrom||'', body.dateTo||'', body.rawBase64||'', body.filename||'') });
+    }
+
+    if (action === 'setAlertSnooze') {
+      const result = setAlertSnooze(body.asin, body.state, body.note || '');
+      return jsonResponse({ status: 'ok', data: result });
     }
 
     return jsonResponse({ status: 'error', message: 'Unknown action: ' + action });
@@ -1117,7 +1126,7 @@ image_plan は必ず 1〜7 の7件を返してください。構成は以下で�
 // Step 2: syncInventoryFromReport() 修正版
 // sku_master の自動更新を追加
 // ============================================
-function syncInventoryFromReport(inventoryData) {
+function syncInventoryFromReport(inventoryData, snapshotDate) {
 
   // ★ 先頭に追加
   const target = inventoryData.find(d => d.asin === 'B0FSZKJWP9');
@@ -1199,6 +1208,29 @@ function syncInventoryFromReport(inventoryData) {
 
   // ★ sku_master を自動更新
   updateSkuMaster_(inventoryData);
+
+  // ★★ 在庫スナップショット記録（追記・非破壊：上のループ＆上書き保存には触れない）
+  try {
+    const snapDate = (snapshotDate && /^\d{4}-\d{2}-\d{2}$/.test(snapshotDate))
+      ? snapshotDate
+      : Utilities.formatDate(new Date(), 'Asia/Tokyo', 'yyyy-MM-dd');
+    const snapRows = inventoryData
+      .filter(d => d && d.asin)
+      .map(d => ({
+        snapshot_date: snapDate,
+        asin:        String(d.asin).trim(),
+        available:   d.available  ?? '',
+        inbound:     d.inbound    ?? '',
+        daily_t7:    d.alertDaily ?? d.dailyT7 ?? '',
+        days_remain: d.daysRemain ?? '',
+        alert:       d.alert      ?? '',
+        synced_at:   d.syncedAt   ?? ''
+      }));
+    const snapRes = appendInventorySnapshot_(snapRows);
+    Logger.log(`在庫スナップショット: ${snapDate} / ${snapRows.length}件 (added=${snapRes.added}, replaced=${snapRes.replaced})`);
+  } catch (e) {
+    Logger.log('在庫スナップショット skip: ' + e.message);  // 失敗しても同期は止めない
+  }
 
   Logger.log(`在庫同期完了: updated=${updated}, skipped=${skipped}`);
   return { updated, skipped };

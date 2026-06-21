@@ -405,3 +405,26 @@ function attachAdBusinessToProducts_(products, periodKey) {
     }
   });
 }
+
+// ============================================
+// 在庫スナップショット（時系列・追記専用）
+//   product_lifecycle への上書き保存とは独立。
+//   最新状態は従来どおり残し、履歴だけをレポート用スプレッドシートに
+//   dedup(snapshot_date + asin) で蓄積する。
+// ============================================
+const SHEET_INVENTORY_SNAPSHOT = 'inventory_snapshot';
+const REQUIRED_HEADERS_INVENTORY_SNAPSHOT = [
+  'id', 'snapshot_date', 'asin',
+  'available', 'inbound', 'daily_t7', 'days_remain', 'alert',
+  'synced_at', 'imported_at'
+];
+
+function appendInventorySnapshot_(snapRows) {
+  if (!snapRows || !snapRows.length) {
+    return { total: 0, appended: 0, replaced: 0, added: 0 };
+  }
+  return upsertReportRows_(
+    SHEET_INVENTORY_SNAPSHOT, REQUIRED_HEADERS_INVENTORY_SNAPSHOT,
+    snapRows, ['snapshot_date', 'asin'], ['snapshot_date', 'synced_at']
+  );
+}
