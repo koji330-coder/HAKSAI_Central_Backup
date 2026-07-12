@@ -565,3 +565,75 @@ function forceConvertAllTitles() {
   range.setValues(newValues);
   Logger.log('全行の数式を値に変換完了: ' + lastRow + '件');
 }
+
+function testRoughProfitCalculation() {
+  Logger.log('=== testRoughProfitCalculation 開始 ===');
+  
+  // 1. ダミーのプロジェクト行オブジェクトを用意する（競合価格・月販など）
+  const project = {
+    title: 'テスト用折りたたみ傘（大型キーワード含む）',
+    category: '傘',
+    price: 3000,
+    monthly_sales: 500
+  };
+  
+  // 2. 中国元単価が20元の場合で概算利益計算を実行
+  const sim = calculateRoughProfit_(project, 20);
+  
+  if (!sim) {
+    Logger.log('シミュレーション結果が null です。');
+    return;
+  }
+  
+  Logger.log('計算結果:');
+  Logger.log('  着地原価 (JPY): ' + sim.cost);
+  Logger.log('  Amazon手数料: ' + sim.amazon);
+  Logger.log('  FBA配送代行手数料: ' + sim.fba);
+  Logger.log('  予測販売数 (堅実値10%): ' + sim.planned_monthly_sales);
+  Logger.log('  個あたり粗利益: ' + sim.net_profit_unit);
+  Logger.log('  粗利益率 (%): ' + sim.profit_rate);
+  Logger.log('  月間予測利益 (堅実値): ' + sim.expected_monthly_profit);
+  
+  // 検証アサーション
+  if (sim.planned_monthly_sales !== 50) {
+    throw new Error('予測販売数の計算が違います。期待値: 50, 結果: ' + sim.planned_monthly_sales);
+  }
+  
+  // 折りたたみ傘（大型キーワード）なのでFBA手数料は900円のはず
+  if (sim.fba !== 900) {
+    throw new Error('FBA手数料の大型キーワード判定が違います。期待値: 900, 結果: ' + sim.fba);
+  }
+  
+  Logger.log('=== testRoughProfitCalculation 成功 ===');
+}
+
+function testAnalyzeCompetitor() {
+  const testData = {
+    asin: 'B0FSD95K68',
+    myPrice: 3000,
+    cnyCost: 20
+  };
+  try {
+    const result = analyzeCompetitorAsin_(testData);
+    Logger.log('Test Success: ' + JSON.stringify(result, null, 2));
+  } catch (e) {
+    Logger.log('Test Failed: ' + e.toString() + '\n' + e.stack);
+  }
+}
+
+function runTestKeepaForTargetAsin() {
+  const asin = 'B0GVBMYTD7';
+  Logger.log('=== Target ASIN Keepa Test ===');
+  const res = tryGetKeepaData_(asin);
+  Logger.log('Result: ' + JSON.stringify(res));
+  if (!res) {
+    const apiKey = PropertiesService.getScriptProperties().getProperty('KEEPA_API_KEY');
+    Logger.log('API Key Status: ' + (apiKey ? '設定あり' : '未設定'));
+    if (apiKey) {
+      const url = `https://api.keepa.com/product?key=${apiKey}&domain=5&asin=${asin}&history=0`;
+      const response = UrlFetchApp.fetch(url, { muteHttpExceptions: true });
+      Logger.log('HTTP Status: ' + response.getResponseCode());
+      Logger.log('Response Content: ' + response.getContentText().slice(0, 1000));
+    }
+  }
+}
