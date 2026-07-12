@@ -3099,23 +3099,43 @@ function readTransactionRows_() {
   if (data.length <= 1) return [];
   const headers = data[0];
   const idx = name => headers.indexOf(name);
-  return data.slice(1).map((row, offset) => ({
-    rowNum: offset + 2,
-    id: String(row[idx('id')] || '').trim(),
-    orderId: String(row[idx('order_id')] || '').trim(),
-    sku: String(row[idx('sku')] || '').trim(),
-    asin: String(row[idx('asin')] || '').trim(),
-    date: row[idx('date')],
-    type: String(row[idx('transaction_type')] || '').trim(),
-    qty: Number(row[idx('qty')]) || 0,
-    salesTaxin: Number(row[idx('sales_taxin')]) || 0,
-    fee: Number(row[idx('fee')]) || 0,
-    fbaFee: Number(row[idx('fba_fee')]) || 0,
-    discount: Number(row[idx('discount')]) || 0,
-    points: Number(row[idx('points')]) || 0,
-    net: Number(row[idx('net')]) || 0,
-    period: String(row[idx('period_key')] || '').trim()
-  })).filter(tx => tx.sku && tx.period && (tx.type === '注文' || tx.type === '返金'));
+  return data.slice(1).map((row, offset) => {
+    const periodVal = row[idx('period_key')];
+    let periodStr = '';
+    if (periodVal instanceof Date) {
+      const y = periodVal.getFullYear();
+      const m = String(periodVal.getMonth() + 1).padStart(2, '0');
+      periodStr = `${y}-${m}`;
+    } else {
+      periodStr = String(periodVal || '').trim();
+      if (periodStr.length > 7 && isNaN(Number(periodStr))) {
+        const d = new Date(periodStr);
+        if (!isNaN(d.getTime())) {
+          const y = d.getFullYear();
+          const m = String(d.getMonth() + 1).padStart(2, '0');
+          periodStr = `${y}-${m}`;
+        }
+      }
+    }
+
+    return {
+      rowNum: offset + 2,
+      id: String(row[idx('id')] || '').trim(),
+      orderId: String(row[idx('order_id')] || '').trim(),
+      sku: String(row[idx('sku')] || '').trim(),
+      asin: String(row[idx('asin')] || '').trim(),
+      date: row[idx('date')],
+      type: String(row[idx('transaction_type')] || '').trim(),
+      qty: Number(row[idx('qty')]) || 0,
+      salesTaxin: Number(row[idx('sales_taxin')]) || 0,
+      fee: Number(row[idx('fee')]) || 0,
+      fbaFee: Number(row[idx('fba_fee')]) || 0,
+      discount: Number(row[idx('discount')]) || 0,
+      points: Number(row[idx('points')]) || 0,
+      net: Number(row[idx('net')]) || 0,
+      period: periodStr
+    };
+  }).filter(tx => tx.sku && tx.period && (tx.type === '注文' || tx.type === '返金'));
 }
 
 function buildCogsLedgerBySku_(sku, reorderRows, txRows, options) {
