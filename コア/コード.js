@@ -1055,8 +1055,38 @@ function requestRetrospectiveFromGemini_(hypothesis, actual) {
 
 function generateRetrospective_(cardId) {
   const card=getCardDetail_ProductLifecycle(cardId); if(!card)throw new Error('カードが見つかりません。');
+  
+  // keepa_data の補完＆保存
+  const asin = card.asin || (card.own_listing && card.own_listing.primary_asin) || '';
+  let keepaUpdated = false;
+  if ((!card.keepa_data || Object.keys(card.keepa_data).length === 0) && asin) {
+    const keepaData = tryGetKeepaData_(asin);
+    if (keepaData) {
+      card.keepa_data = {
+        asin:        asin,
+        monthlySold: keepaData.monthlySold,
+        imageCount:  keepaData.imageCount,
+        hasAplus:    keepaData.hasAplus,
+        brand:       keepaData.brand,
+        features:    keepaData.features,
+      };
+      keepaUpdated = true;
+    }
+  }
+
   const project=findPageProjectByCardId_(cardId), hypothesis=buildHypothesisPack_(card,project), actual=buildActualPack_(card);
   if(!actual.data_ready)throw new Error('振り返りに必要な販売実績がありません。');
+
+  if (keepaUpdated) {
+    const lcSheet = getSheetByName_(SHEET_PRODUCT_LIFECYCLE, REQUIRED_HEADERS_LIFECYCLE);
+    const lcHeaders = getHeaders_(lcSheet, REQUIRED_HEADERS_LIFECYCLE);
+    const keepaDataIdx = lcHeaders.indexOf('keepa_data');
+    const meta = readLifecycleMeta_()[asin];
+    if (meta && meta.rowNum && keepaDataIdx >= 0) {
+      lcSheet.getRange(meta.rowNum, keepaDataIdx + 1).setValue(JSON.stringify(card.keepa_data));
+    }
+  }
+
   let result, lastError; for(let attempt=0;attempt<2;attempt++){try{result=requestRetrospectiveFromGemini_(hypothesis,actual);break;}catch(e){lastError=e;}}
   if(!result)throw new Error('振り返りのJSON生成に失敗しました。再試行してください。 '+lastError.message);
   const own=normalizeOwnListingObject_(card.own_listing), now=new Date().toISOString();
