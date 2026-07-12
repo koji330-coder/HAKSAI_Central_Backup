@@ -13,13 +13,24 @@ const GEMINI_API_KEY = PROPS.getProperty('GEMINI_API_KEY');
 const DRIVE_FOLDER_ID = PROPS.getProperty('DRIVE_FOLDER_ID');
 const SPREADSHEET_ID = PROPS.getProperty('SPREADSHEET_ID');
 const GEMINI_MODEL = PROPS.getProperty('GEMINI_MODEL') || 'gemini-3.1-flash-lite';
+const ATLAS_API_URL = PROPS.getProperty('ATLAS_API_URL') || '';
+const ATLAS_API_KEY = PROPS.getProperty('ATLAS_API_KEY') || '';
+const LANDED_COST_WEBAPP_URL = PROPS.getProperty('LANDED_COST_WEBAPP_URL') || '';
 
 const SHEET_CARDS = 'cards';
 const SHEET_PAGE_PROJECTS = 'page_projects';
+const SHEET_PAGE_EVENTS = 'page_project_events';
+const PAGE_STALE_DAYS = 7;
+const SHELF_REVIEW_INTERVAL_DAYS = 30;
+const SHELF_EXTEND_NUDGE_COUNT = 2;
 
 // 新規シート（v6）
 const SHEET_PRODUCT_LIFECYCLE = 'product_lifecycle';
 const SHEET_REORDER_HISTORY = 'reorder_history';
+const SHEET_RESEARCH_LESSONS = 'research_lessons';
+const VERIFY_OBSERVE_DAYS = 90;
+const VERIFY_HIT_TOLERANCE = 0.15;
+const PRICE_BAND_SIZE = 500;
 
 // 変更後
 const REQUIRED_HEADERS_LIFECYCLE = [
@@ -31,17 +42,24 @@ const REQUIRED_HEADERS_LIFECYCLE = [
   'supplier_1688_url', 'rakumart_linkage_status', 'barcode_option',
   'current_landed_cost', 'actual_result', 'is_deleted', 'is_launched', 'source',
   'fba_stock', 'fba_inbound', 'fba_daily_t7', 'fba_days_remain', 'fba_alert', 'fba_synced_at', 'sales_actual',
-  'idea_tags_json', 'idea_tags_updated_at', 'idea_tags_source' , 'keepa_data' // ← 追加
+  'idea_tags_json', 'idea_tags_updated_at', 'idea_tags_source' , 'keepa_data', 'own_listing', 'origin_type'
+];
+
+const REQUIRED_HEADERS_RESEARCH_LESSONS = [
+  'lesson_id', 'card_id', 'page_project_id', 'own_asin', 'category', 'price_band',
+  'entry_thesis_tags', 'verdict', 'hit_json', 'missed_json', 'lessons_json',
+  'next_seeds_json', 'hypothesis_snapshot_json', 'actual_snapshot_json',
+  'generated_by', 'created_at'
 ];
 
 const JSON_COLS_LIFECYCLE = [
   'tags', 'urls', 'audit', 'produce', 'scores', 'checks',
   'image_drive_ids', 'profit', 'cost_simulation', 'page_draft', 'actual_result', 'sales_actual',
-  'idea_tags_json' , 'keepa_data' // ← 追加
+  'idea_tags_json' , 'keepa_data', 'own_listing'
 ];
 
 const OBJECT_JSON_COLS_LIFECYCLE = [
-  'audit', 'produce', 'scores', 'checks', 'profit', 'cost_simulation', 'page_draft', 'actual_result'
+  'audit', 'produce', 'scores', 'checks', 'profit', 'cost_simulation', 'page_draft', 'actual_result', 'own_listing'
 ];
 
 const BOOLEAN_COLS_LIFECYCLE = ['is_deleted', 'is_launched'];
@@ -78,16 +96,27 @@ const REQUIRED_HEADERS_CARDS = [
 
 const JSON_COLS_PAGE = [
   'tags', 'supplier_keywords', 'image_drive_ids', 'urls', 'extra_image_ids',
-  'extra_texts', 'page_draft', 'import_decision'
+  'extra_texts', 'page_draft', 'import_decision', 'extracted_input', 'extraction_meta', 'prompt_pack_meta',
+  'sourcing_brief', 'sourcing_comparison', 'supplier_selection', 'listing_handoff',
+  'consultation_topics', 'own_listing', 'research_lineage'
 ];
 
-const OBJECT_JSON_COLS_PAGE = ['extra_texts', 'page_draft', 'import_decision'];
+const OBJECT_JSON_COLS_PAGE = ['extra_texts', 'page_draft', 'import_decision', 'extracted_input', 'extraction_meta', 'prompt_pack_meta', 'sourcing_brief', 'sourcing_comparison', 'supplier_selection', 'listing_handoff', 'own_listing', 'research_lineage'];
 const BOOLEAN_COLS_PAGE = [];
 
 const REQUIRED_HEADERS_PAGE = [
   'id', 'source_card_id', 'status', 'title', 'category', 'summary', 'price', 'monthly_sales', 'reviews',
   'tags', 'supplier_keywords', 'weakness', 'diff', 'image_drive_ids', 'urls',
-  'extra_image_ids', 'extra_texts', 'page_draft', 'memo', 'import_decision', 'initial_order_qty', 'created_at', 'updated_at'
+  'extra_image_ids', 'extra_texts', 'page_draft', 'memo', 'import_decision', 'initial_order_qty', 'created_at', 'updated_at',
+  'extracted_input', 'extraction_meta', 'prompt_pack_meta', 'sourcing_state', 'adopted_candidate_id',
+  'sourcing_brief', 'sourcing_comparison', 'supplier_selection', 'listing_handoff',
+  'consultation_memo', 'consultation_memo_updated_at', 'consultation_topics', 'document_role', 'document_status', 'own_listing', 'research_lineage',
+  'shelf_state', 'shelved_at', 'wake_at', 'shelf_reason'
+];
+
+const REQUIRED_HEADERS_PAGE_EVENTS = [
+  'event_id', 'page_project_id', 'source_card_id', 'event_type',
+  'reason', 'payload_json', 'actor', 'created_at'
 ];
 
 function jsonResponse(obj) {
@@ -178,7 +207,9 @@ function ensureHeaders_(sheetName, requiredHeaders) {
 function migrateDatabase() {
   const addedCards = ensureHeaders_(SHEET_CARDS, REQUIRED_HEADERS_CARDS);
   const addedPages = ensureHeaders_(SHEET_PAGE_PROJECTS, REQUIRED_HEADERS_PAGE);
-  Logger.log(`cards: ${addedCards}列追加 / page_projects: ${addedPages}列追加`);
+  const addedLifecycle = ensureHeaders_(SHEET_PRODUCT_LIFECYCLE, REQUIRED_HEADERS_LIFECYCLE);
+  const addedLessons = ensureHeaders_(SHEET_RESEARCH_LESSONS, REQUIRED_HEADERS_RESEARCH_LESSONS);
+  Logger.log(`cards: ${addedCards}列追加 / page_projects: ${addedPages}列追加 / lifecycle: ${addedLifecycle}列追加 / lessons: ${addedLessons}列追加`);
 }
 
 // ============================================
@@ -188,8 +219,38 @@ function doGet(e) {
   const body = parseBody_(e);  // ← parseBodyを先に呼ぶ
   try {
     const action = e && e.parameter ? e.parameter.action : '';
+    if (action === 'debugReadSheet') {
+      const asin = e.parameter.asin || 'B0FX55ZKRB';
+      const ss = SpreadsheetApp.openById(PropertiesService.getScriptProperties().getProperty('SPREADSHEET_ID'));
+      const sh = ss.getSheetByName('product_lifecycle');
+      const data = sh.getDataRange().getValues();
+      const headers = data[0];
+      const asinIdx = headers.indexOf('asin');
+      const row = data.find(r => String(r[asinIdx]).trim().toUpperCase() === asin.toUpperCase());
+      if (!row) return jsonResponse({ status: 'error', message: 'ASIN not found in sheet: ' + asin });
+      
+      const rowObj = {};
+      headers.forEach((h, i) => {
+        rowObj[h] = row[i];
+      });
+      return jsonResponse({ status: 'ok', rowData: rowObj });
+    }
     if (action === 'getCards') return jsonResponse({ status: 'ok', cards: getAllCards_ProductLifecycle() });
-    if (action === 'getPageProjects') return jsonResponse({ status: 'ok', pageProjects: getAllPageProjects() });
+    if (action === 'getResearchLessons') return jsonResponse({ status: 'ok', data: getResearchLessons_() });
+    if (action === 'getCardDetail') {
+      const id = e.parameter.id || '';
+      if (!id) return jsonResponse({ status: 'error', message: 'id required' });
+      const card = getCardDetail_ProductLifecycle(id);
+      if (!card) return jsonResponse({ status: 'error', message: 'card not found: ' + id });
+      return jsonResponse({ status: 'ok', card });
+    }
+    if (action === 'getPageProjects') {
+      const pageProjects = attachPageProjectSourcingFlags_(getAllPageProjects());
+      recordDueWakeEvents_(pageProjects);
+      return jsonResponse({ status: 'ok', pageProjects: pageProjects, shelfDigest: getShelfDigestForSecretary_(pageProjects) });
+    }
+    if (action === 'getActivePageSkillPack') return jsonResponse({ status: 'ok', data: getActivePageSkillPackInfo_() });
+    if (action === 'getRakumartSourcingBoard') return jsonResponse({ status:'ok', data:getRakumartSourcingBoard_(e.parameter.pageProjectId || '') });
     if (action === 'getFilterButtons') {
       return jsonResponse({ status: 'ok', buttons: getFilterButtons() });
     }
@@ -198,12 +259,61 @@ function doGet(e) {
       return jsonResponse({ status: 'ok', data: getPeriodSummary(periodKey) });
     }
 
+    if (action === 'checkTransactionPerfectDuplicates' || action === 'checkTransactionRepeatedLines') {
+      return jsonResponse({ status: 'ok', data: checkTransactionRepeatedLines() });
+    }
+
+    if (action === 'writeTransactionRepeatedLineLog') {
+      return jsonResponse({ status: 'ok', data: writeTransactionRepeatedLineLog_() });
+    }
+
+    if (action === 'dryRunDeduplicateTransactionHistory') {
+      return jsonResponse({
+        status: 'error',
+        message: 'disabled: Amazon transaction reports can contain legitimate repeated lines for multi-unit orders. Use checkTransactionRepeatedLines for inspection only.'
+      });
+    }
+
+    if (action === 'dryRunSalesActualMovingAverage') {
+      const applyActualFields = String(e.parameter.applyActualFields || '') === 'true';
+      return jsonResponse({ status: 'ok', data: recalcSalesActualMovingAverage(true, applyActualFields) });
+    }
+
+    if (action === 'debugMovingAverageForSku') {
+      return jsonResponse({ status: 'ok', data: debugMovingAverageForSku(e.parameter.sku || '') });
+    }
+
+    if (action === 'diagnoseMovingAverageCostCoverage') {
+      return jsonResponse({ status: 'ok', data: diagnoseMovingAverageCostCoverage(e.parameter.periodKey || '') });
+    }
+
+    if (action === 'diagnoseMissingCostSources') {
+      return jsonResponse({ status: 'ok', data: diagnoseMissingCostSources(e.parameter.periodKey || '') });
+    }
+
     if (action === 'getAvailablePeriods') {
       return jsonResponse({ status: 'ok', periods: getAvailablePeriods() });
     }
 
     if (action === 'getInventoryAlerts') {
       return jsonResponse({ status: 'ok', data: getInventoryAlerts() });
+    }
+
+    if (action === 'getCrossDiagnostics') {
+      const periodKey = e.parameter.periodKey || '';
+      return jsonResponse({ status: 'ok', data: getCrossDiagnostics(periodKey) });
+    }
+
+    if (action === 'getSecretaryState') {
+      return jsonResponse({ status:'ok', data:getSecretaryState_() });
+    }
+
+    if (action === 'getSecretaryCardDetail') {
+      return jsonResponse({ status:'ok', data:getSecretaryCardDetail_(e.parameter.asin || '', e.parameter.category || '') });
+    }
+
+    if (action === 'getInboundPlan') {
+      return jsonResponse({ status: 'ok', data: getInboundPlan() });
     }
 
     if (action === 'debugLastInventory') {
@@ -236,6 +346,10 @@ function doGet(e) {
       return jsonResponse({ status: 'ok', boxes });
     }
 
+    if (action === 'getHomeInventoryOverview') {
+      return jsonResponse({ status:'ok', data:getHomeInventoryOverview_() });
+    }
+
     if (action === 'getAsinToFnskuMap') {
       return jsonResponse({ status: 'ok', map: getAsinToFnskuMap() });
     }
@@ -265,10 +379,29 @@ function doGet(e) {
       return jsonResponse({ status:'ok', data: getImportStatus() });
     }
 
+    if (action === 'getLandedCostToolConfig') {
+      return jsonResponse({ status:'ok', data: getLandedCostToolConfig_() });
+    }
+
+    if (action === 'getAsinList') {
+      return jsonResponse({ status: 'ok', list: getAsinList_() });
+    }
+
+    if (action === 'decision_pack') return packAuthOk_(e) ? doGetDecisionPack_(e) : packDeny_();
+    if (action === 'audit_pack')    return packAuthOk_(e) ? doGetAuditPack_(e)    : packDeny_();
+    if (action === 'pack_view')     return packAuthOk_(e) ? doGetPackView_(e)     : packDeny_();
+
     return jsonResponse({ status: 'ok', message: 'HAKSAI API v6 is running.' });
   } catch (err) {
     return jsonResponse({ status: 'error', message: err.message, stack: err.stack });
   }
+}
+
+function getLandedCostToolConfig_() {
+  return {
+    url: LANDED_COST_WEBAPP_URL,
+    configured: !!LANDED_COST_WEBAPP_URL
+  };
 }
 
 // ============================================
@@ -307,6 +440,24 @@ function doPost(e) {
       return jsonResponse({ status: 'ok', data: result });
     }
 
+    if (action === 'fetchAtlasCardDraft') {
+      return jsonResponse(fetchAtlasCardDraft_(body.asin));
+    }
+
+    if (action === 'saveAtlasCardDraft') {
+      return jsonResponse(saveAtlasCardDraft_(body.cardData));
+    }
+
+    // Seller ATLASの参入候補専用。PACK_KEYで認証し、ASIN単位でUPSERTする。
+    if (action === 'upsertDecisionCard') {
+      if (!decisionCardAuthOk_(body)) return jsonResponse({ status: 'error', message: 'invalid key' });
+      return jsonResponse(upsertDecisionCard_(body.cardData));
+    }
+
+    if (action === 'analyzeCompetitorAsin') {
+      return jsonResponse(analyzeCompetitorAsin_(body));
+    }
+
     // ✅ v6: product_lifecycle に直接保存
     if (action === 'saveCard') {
       saveCardToLifecycle(body.cardData);
@@ -335,6 +486,7 @@ function doPost(e) {
 
     if (action === 'updatePageProject') {
       const projectData = body.projectData || {};
+      const beforeUpdate = getAllPageProjects().find(function(p) { return String(p.id) === String(projectData.id || ''); });
       const extraImages = body.extraImages || [];
       if (extraImages.length) {
         const newIds = saveImagesToDrive_(extraImages, projectData.id, 'page');
@@ -342,14 +494,29 @@ function doPost(e) {
       }
       const ok = updatePageProjectInSheet(projectData);
       if (!ok) return jsonResponse({ status: 'error', message: '更新対象のページ制作案件が見つかりません。' });
+      if (beforeUpdate && beforeUpdate.status !== '撤退' && projectData.status === '撤退') {
+        logPageProjectEvent_(projectData.id, projectData.source_card_id, 'retired', '', { prev_status: beforeUpdate.status || '' }, 'user');
+      }
       return jsonResponse({ status: 'ok', data: projectData });
     }
 
     if (action === 'generatePageDraft') {
       const projectData = body.projectData || {};
+      // 生成ゲートはクライアント送信値ではなく、シートの正本を使用する。
+      const storedProject = getAllPageProjects().find(function(p) {
+        return String(p.id) === String(projectData.id || '');
+      });
+      if (storedProject) {
+        projectData.sourcing_state = storedProject.sourcing_state;
+        projectData.listing_handoff = storedProject.listing_handoff;
+        projectData.adopted_candidate_id = storedProject.adopted_candidate_id;
+        projectData.sourcing_brief = storedProject.sourcing_brief;
+        projectData.tags = storedProject.tags;
+      }
       const extraImages = body.extraImages || [];
       const draft = generatePageDraft_(projectData, extraImages);
-      projectData.page_draft = draft;
+      projectData.page_draft = Object.assign({}, projectData.page_draft || {}, draft);
+      projectData.prompt_pack_meta = getActivePageSkillPackInfo_();
       projectData.updated_at = new Date().toISOString();
       if (extraImages.length) {
         const newIds = saveImagesToDrive_(extraImages, projectData.id, 'page');
@@ -359,9 +526,45 @@ function doPost(e) {
       return jsonResponse({ status: 'ok', data: projectData });
     }
 
+    if (action === 'uploadPageSkillPack') {
+      return jsonResponse({ status: 'ok', data: uploadPageSkillPack_(body.filename, body.base64) });
+    }
+
+    if (action === 'extractPageInputs') {
+      const projectData = body.projectData || {};
+      const images = body.images || [];
+      projectData.extracted_input = extractPageInputsFromScreenshots_(projectData, images);
+      projectData.extraction_meta = projectData.extracted_input._meta || {};
+      projectData.updated_at = new Date().toISOString();
+      if (images.length) {
+        const newIds = saveImagesToDrive_(images, projectData.id, 'source');
+        projectData.extra_image_ids = (Array.isArray(projectData.extra_image_ids) ? projectData.extra_image_ids : []).concat(newIds);
+      }
+      updatePageProjectInSheet(projectData);
+      return jsonResponse({ status: 'ok', data: projectData });
+    }
+
+    if (action === 'generateRakumartSearchBrief') return jsonResponse({ status:'ok', data:generateRakumartSearchBrief_(body.projectData || {}) });
+    if (action === 'addRakumartCandidate') return jsonResponse({ status:'ok', data:addRakumartCandidate_(body.pageProjectId, body.candidate || {}, body.images || []) });
+    if (action === 'compareRakumartCandidates') return jsonResponse({ status:'ok', data:compareRakumartCandidates_(body.pageProjectId) });
+    if (action === 'adoptRakumartCandidate') return jsonResponse({ status:'ok', data:adoptRakumartCandidate_(body.pageProjectId, body.candidateId) });
+    if (action === 'adoptExtractedInputAsSupplier') return jsonResponse({ status:'ok', data:adoptExtractedInputAsSupplier_(body.pageProjectId, body.supplierUrl || '') });
+    if (action === 'shelvePageProject') return jsonResponse({ status:'ok', data:shelvePageProject_(body.pageProjectId, body.reason, body.wakeAt) });
+    if (action === 'wakePageProject') return jsonResponse({ status:'ok', data:wakePageProject_(body.pageProjectId, body.mode, body.wakeAt) });
+    if (action === 'logPageProjectEvent') return jsonResponse({ status:'ok', data:logPageProjectEventOncePerDay_(body.pageProjectId, body.eventType, body.reason || '', body.payload || {}) });
+    if (action === 'saveOwnListingLink') return jsonResponse({ status:'ok', data:saveOwnListingLink_(body.pageProjectId, body.ownListing || {}) });
+    if (action === 'connectOwnListing') return jsonResponse({ status:'ok', data:connectOwnListing_(body.cardId, body.ownListing || {}) });
+    if (action === 'generateRetrospective') return jsonResponse({ status:'ok', data:generateRetrospective_(body.cardId) });
+    if (action === 'getLessonsForCandidate') return jsonResponse({ status:'ok', data:getLessonsForCandidate_(body.factPack || {}) });
+
       if (action === 'syncInventory') {
     const result = syncInventoryFromReport(body.inventoryData || [], body.snapshotDate || '')
     return jsonResponse({ status: 'ok', data: result });
+    }
+
+    if (action === 'syncInboundPlan') {
+      const result = syncInboundPlan(body.rows || [], body.snapshotDate || '');
+      return jsonResponse({ status: 'ok', data: result });
     }
 
       // doPost内に追加
@@ -380,6 +583,64 @@ function doPost(e) {
       return jsonResponse({ status: 'ok', data: result });
     }
 
+    if (action === 'recalcSalesActualMovingAverage') {
+      const result = recalcSalesActualMovingAverage(body.dryRun !== false, body.applyActualFields === true);
+      return jsonResponse({ status: 'ok', data: result });
+    }
+
+    if (action === 'deduplicateTransactionHistory') {
+      return jsonResponse({
+        status: 'error',
+        message: 'disabled: transaction_history automatic dedupe is unsafe for Amazon multi-unit orders.'
+      });
+    }
+
+
+    if (action === 'updateSecretaryCard') {
+      return jsonResponse({ status:'ok', data:updateSecretaryCard_(body) });
+    }
+
+    if (action === 'saveSecretarySettings') {
+      return jsonResponse({ status:'ok', data:secSaveSettings_(body.settings || {}) });
+    }
+
+    if (action === 'runSecretaryNow') {
+      runDailyBrief({ refresh:body.refresh === true });
+      return jsonResponse({ status:'ok', data:runAiPortfolioReview_({ trigger:'manual' }) });
+    }
+
+    if (action === 'secretaryProductReview') {
+      return jsonResponse({ status:'ok', data:secretaryProductReview_(body) });
+    }
+
+    if (action === 'secretaryPortfolioReview') {
+      return jsonResponse({ status:'ok', data:secretaryPortfolioReview_(body) });
+    }
+
+    if (action === 'secretaryPageImprovement') {
+      return jsonResponse({ status:'ok', data:secretaryPageImprovement_(body) });
+    }
+
+    if (action === 'setupSecretaryTrigger') {
+      if (body.confirm !== 'SETUP_SECRETARY_DAILY') throw new Error('確認値が必要です。');
+      return jsonResponse({ status:'ok', data:setupSecretaryDailyTrigger() });
+    }
+
+    if (action === 'costSimActualize') {
+      const dryRun = body.dryRun !== false;
+      if (!dryRun && body.confirm !== 'APPLY_COST_SIM_ACTUALS') {
+        return jsonResponse({ status: 'error', message: '本適用には確認値が必要です。' });
+      }
+      return jsonResponse({ status: 'ok', data: actualizeCostSim({ dryRun: dryRun }) });
+    }
+
+    if (action === 'costSimBackup') {
+      if (body.confirm !== 'BACKUP_PRODUCT_LIFECYCLE') {
+        return jsonResponse({ status: 'error', message: 'バックアップには確認値が必要です。' });
+      }
+      return jsonResponse({ status: 'ok', data: backupProductLifecycleForCostSim() });
+    }
+
     if (action === 'saveComparisonReport') {
       const result = saveComparisonReport_(body.filename, body.content);
       return jsonResponse({ status: 'ok', data: result });
@@ -390,6 +651,14 @@ function doPost(e) {
       return jsonResponse(recordBoxMovement(
         body.boxId, body.identifier, body.type, body.qty, body.memo
       ));
+    }
+
+    if (action === 'setHomeInventoryQuantity') {
+      return jsonResponse({ status:'ok', data:setHomeInventoryQuantity_(body.item || {}) });
+    }
+
+    if (action === 'bulkSetHomeInventory') {
+      return jsonResponse({ status:'ok', data:bulkSetHomeInventory_(body.rows || []) });
     }
 
     if (action === 'syncAdProductReport') {
@@ -417,26 +686,26 @@ function doPost(e) {
 
 
 function getAllCards_ProductLifecycle() {
+  ensureHeaders_(SHEET_PRODUCT_LIFECYCLE, REQUIRED_HEADERS_LIFECYCLE);
   const sheet = getSheetByName_(SHEET_PRODUCT_LIFECYCLE, REQUIRED_HEADERS_LIFECYCLE);
   const data = sheet.getDataRange().getValues();
   if (data.length <= 1) return [];
   const headers = getHeaders_(sheet, REQUIRED_HEADERS_LIFECYCLE);
 
-  const jsonCols = [
-    'tags', 'urls', 'audit', 'produce', 'scores', 'checks',
-    'image_drive_ids', 'profit', 'cost_simulation', 'page_draft',
-    'actual_result', 'sales_actual', 'keepa_data'
-  ];
+  // 一覧で実際に使うJSONだけを解析する。巨大なAI分析・ページ案を
+  // 全件JSON.parseしてから捨てると、GASの応答がタイムアウトしやすい。
+  const jsonCols = ['tags', 'urls', 'scores', 'profit', 'cost_simulation', 'sales_actual', 'own_listing'];
   const objectCols = [
     'audit', 'produce', 'scores', 'checks', 'profit',
-    'cost_simulation', 'page_draft', 'actual_result'
+    'cost_simulation', 'page_draft', 'actual_result', 'own_listing'
   ];
   const boolCols = ['is_deleted', 'is_launched'];
 
   // 一覧表示に不要な重いフィールドを除外
   const excludeCols = new Set([
     'keepa_data', 'audit', 'produce', 'checks',
-    'page_draft', 'actual_result', 'image_drive_ids', 'description'
+    'page_draft', 'actual_result', 'image_drive_ids', 'image_drive_id', 'description',
+    'supplier_keywords_json', 'idea_tags_json'
   ]);
 
   const list = [];
@@ -450,14 +719,685 @@ function getAllCards_ProductLifecycle() {
   return list;
 }
 
+function getCardDetail_ProductLifecycle(id) {
+  id = String(id || '').trim();
+  if (!id) return null;
+
+  ensureHeaders_(SHEET_PRODUCT_LIFECYCLE, REQUIRED_HEADERS_LIFECYCLE);
+  const sheet = getSheetByName_(SHEET_PRODUCT_LIFECYCLE, REQUIRED_HEADERS_LIFECYCLE);
+  const data = sheet.getDataRange().getValues();
+  if (data.length <= 1) return null;
+
+  const headers = getHeaders_(sheet, REQUIRED_HEADERS_LIFECYCLE);
+  const idIdx = headers.indexOf('id');
+  if (idIdx === -1) throw new Error('product_lifecycle に id 列が見つかりません。');
+
+  const jsonCols = [
+    'tags', 'urls', 'audit', 'produce', 'scores', 'checks',
+    'image_drive_ids', 'profit', 'cost_simulation', 'page_draft',
+    'actual_result', 'sales_actual', 'keepa_data', 'own_listing'
+  ];
+  const objectCols = [
+    'audit', 'produce', 'scores', 'checks', 'profit',
+    'cost_simulation', 'page_draft', 'actual_result', 'keepa_data', 'own_listing'
+  ];
+
+  for (let i = 1; i < data.length; i++) {
+    if (String(data[i][idIdx] || '').trim() === id) {
+      return rowToObject_(headers, data[i], jsonCols, objectCols, BOOLEAN_COLS_LIFECYCLE);
+    }
+  }
+  return null;
+}
+
+function normalizeOwnListingObject_(value) {
+  let own = value;
+  if (typeof own === 'string') {
+    try { own = JSON.parse(own || '{}'); } catch (e) { own = {}; }
+  }
+  own = own && typeof own === 'object' && !Array.isArray(own) ? own : {};
+  return {
+    primary_asin: String(own.primary_asin || '').trim().toUpperCase(),
+    parent_asin: String(own.parent_asin || '').trim().toUpperCase(),
+    child_asins: Array.from(new Set((Array.isArray(own.child_asins) ? own.child_asins : []).map(function(x) { return String(x || '').trim().toUpperCase(); }).filter(Boolean))),
+    connected_at: String(own.connected_at || ''), updated_at: String(own.updated_at || ''),
+    keepa_status: String(own.keepa_status || ''), latest_snapshot_id: String(own.latest_snapshot_id || '')
+  };
+}
+
+function stableOwnListingJson_(value) {
+  const own = normalizeOwnListingObject_(value);
+  own.child_asins.sort();
+  return JSON.stringify(own);
+}
+
+function hasOwnAsin_(ownListing) {
+  const own = normalizeOwnListingObject_(ownListing);
+  return !!(own.primary_asin || own.parent_asin || own.child_asins.length);
+}
+
+function isGraduated_(card, linkedProject) {
+  if (!card || card.is_deleted === true) return false;
+  if (String(card.origin_type || '') !== 'research' || card.is_launched !== true) return false;
+  return hasOwnAsin_(card.own_listing) || !!(linkedProject && hasOwnAsin_(linkedProject.own_listing));
+}
+
+function auditOriginTypeBackfill() {
+  ensureHeaders_(SHEET_PRODUCT_LIFECYCLE, REQUIRED_HEADERS_LIFECYCLE);
+  const sheet = getSheetByName_(SHEET_PRODUCT_LIFECYCLE, REQUIRED_HEADERS_LIFECYCLE);
+  const data = sheet.getDataRange().getValues();
+  const headers = getHeaders_(sheet, REQUIRED_HEADERS_LIFECYCLE);
+  const sourceIdx = headers.indexOf('source'), originIdx = headers.indexOf('origin_type'), ownIdx = headers.indexOf('own_listing');
+  const sources = {}, pollutedOwnListingCandidates = [];
+  for (let i = 1; i < data.length; i++) {
+    const source = String(data[i][sourceIdx] || '').trim() || '(blank)';
+    const inferred = legacyOriginTypeFromSource_(source === '(blank)' ? '' : source);
+    const key = source + ' -> ' + inferred;
+    sources[key] = (sources[key] || 0) + 1;
+    const existing = String(data[i][originIdx] || '').trim();
+    const own = normalizeOwnListingObject_(data[i][ownIdx]);
+    if (!hasOwnAsin_(own) && own.connected_at) pollutedOwnListingCandidates.push({ row: i + 1, id: String(data[i][0] || ''), source: source, connected_at: own.connected_at });
+    if (existing && ['research','import'].indexOf(existing) < 0) sources['INVALID: ' + existing] = (sources['INVALID: ' + existing] || 0) + 1;
+  }
+  const result = { rows: Math.max(0, data.length - 1), source_summary: sources, suspicious_own_listing: pollutedOwnListingCandidates };
+  Logger.log('auditOriginTypeBackfill: ' + JSON.stringify(result));
+  return result;
+}
+
+function backfillOriginType() {
+  ensureHeaders_(SHEET_PRODUCT_LIFECYCLE, REQUIRED_HEADERS_LIFECYCLE);
+  const sheet = getSheetByName_(SHEET_PRODUCT_LIFECYCLE, REQUIRED_HEADERS_LIFECYCLE);
+  const data = sheet.getDataRange().getValues();
+  const headers = getHeaders_(sheet, REQUIRED_HEADERS_LIFECYCLE);
+  const sourceIdx = headers.indexOf('source'), originIdx = headers.indexOf('origin_type');
+  let updated = 0;
+  for (let i = 1; i < data.length; i++) {
+    if (String(data[i][originIdx] || '').trim()) continue;
+    const source = String(data[i][sourceIdx] || '').trim();
+    sheet.getRange(i + 1, originIdx + 1).setValue(legacyOriginTypeFromSource_(source));
+    updated++;
+  }
+  Logger.log('backfillOriginType: ' + updated + '件設定');
+  return updated;
+}
+
+function legacyOriginTypeFromSource_(source) {
+  source = String(source || '').trim();
+  return !source || ['inventory_import','csv_import','merged_duplicate'].indexOf(source) >= 0 ? 'import' : 'research';
+}
+
+function assertAsinsInSkuMaster_(asins) {
+  const list = getAsinList_();
+  if (!list.length) throw new Error('sku_masterにASINが登録されていません。先に在庫レポートを同期してください。');
+  const valid = new Set(list.map(function(x) { return String(x.asin || '').toUpperCase(); }));
+  asins.forEach(function(asin) {
+    if (!valid.has(asin)) throw new Error('ASIN "' + asin + '" はsku_masterに存在しません。候補から選択してください。');
+  });
+}
+
+function findPageProjectByCardId_(cardId) {
+  return getAllPageProjects().find(function(p) { return String(p.source_card_id || p.card_id || '') === String(cardId); }) || null;
+}
+
+function connectOwnListing_(cardId, input) {
+  const lock = LockService.getScriptLock(); lock.waitLock(30000);
+  try {
+    const card = getCardDetail_ProductLifecycle(cardId);
+    if (!card) throw new Error('カードが見つかりません。');
+    input = input || {};
+    const primary = lfAsin_(input.primary_asin), parent = lfAsin_(input.parent_asin);
+    const children = Array.from(new Set((Array.isArray(input.child_asins) ? input.child_asins : []).map(lfAsin_).filter(Boolean)));
+    const asins = [primary, parent].concat(children).filter(Boolean);
+    if (!asins.length) throw new Error('自社ASINを1件以上入力してください。');
+    assertAsinsInSkuMaster_(asins);
+    const project = findPageProjectByCardId_(cardId);
+    const competitors = (((project || {}).research_lineage || {}).competitor_asins || []).map(function(x) { return String(x || '').toUpperCase(); });
+    asins.forEach(function(asin) { if (competitors.indexOf(asin) >= 0) throw new Error('競合ASINを自社ASINとして登録できません: ' + asin); });
+    const old = normalizeOwnListingObject_(card.own_listing), now = new Date().toISOString();
+    card.own_listing = { primary_asin:primary, parent_asin:parent, child_asins:children, connected_at:old.connected_at || now, updated_at:now, keepa_status:old.keepa_status || 'not_fetched', latest_snapshot_id:old.latest_snapshot_id || '' };
+    card.is_launched = true;
+    card.origin_type = card.origin_type || 'research';
+    card.asin = primary || parent || children[0];
+    if (!updateCardInLifecycle(card)) throw new Error('カードの更新に失敗しました。');
+    if (project && !project.document_status) { project.own_listing = card.own_listing; project.document_status = 'candidate_selected'; updatePageProjectInSheet(project); }
+    return card;
+  } finally { lock.releaseLock(); }
+}
+
+function getResearchLessons_() {
+  ensureHeaders_(SHEET_RESEARCH_LESSONS, REQUIRED_HEADERS_RESEARCH_LESSONS);
+  const sheet = getSheetByName_(SHEET_RESEARCH_LESSONS, REQUIRED_HEADERS_RESEARCH_LESSONS);
+  const data = sheet.getDataRange().getValues();
+  if (data.length <= 1) return [];
+  const headers = getHeaders_(sheet, REQUIRED_HEADERS_RESEARCH_LESSONS);
+  const jsonCols = new Set(['entry_thesis_tags','hit_json','missed_json','lessons_json','next_seeds_json','hypothesis_snapshot_json','actual_snapshot_json']);
+  return data.slice(1).filter(function(row) { return row[0]; }).map(function(row) {
+    const out = {}; headers.forEach(function(h, i) { let v = row[i]; if (jsonCols.has(h)) { try { v = JSON.parse(v || (h.indexOf('snapshot') >= 0 ? '{}' : '[]')); } catch(e) { v = h.indexOf('snapshot') >= 0 ? {} : []; } } out[h] = v; }); return out;
+  }).sort(function(a,b) { return new Date(a.created_at || 0) - new Date(b.created_at || 0); });
+}
+
+function resolveSaleStartDate_(card) {
+  const own = normalizeOwnListingObject_((card || {}).own_listing);
+  const candidates = [own.connected_at, card && card.amazon_published_date];
+  for (let i = 0; i < candidates.length; i++) { const d = new Date(candidates[i]); if (candidates[i] && !isNaN(d.getTime())) return d; }
+  const periods = (Array.isArray(card && card.sales_actual) ? card.sales_actual : []).map(function(x) { return String((x || {}).period || ''); }).filter(function(x) { return /^\d{4}-\d{2}$/.test(x); }).sort();
+  return periods.length ? new Date(periods[0] + '-01T00:00:00+09:00') : null;
+}
+
+function buildActualPack_(card) {
+  const now = new Date();
+  const currentPeriod = now.getFullYear() + '-' + String(now.getMonth() + 1).padStart(2, '0');
+  const start = resolveSaleStartDate_(card);
+  
+  const allRows = (Array.isArray(card && card.sales_actual) ? card.sales_actual : [])
+    .slice()
+    .filter(function(x) { return x && /^\d{4}-\d{2}$/.test(String(x.period || '')); })
+    .sort(function(a, b) { return String(a.period).localeCompare(String(b.period)); });
+
+  let isPartialStartMonth = false;
+  let daysInMonth = 0;
+  let monthDays = 0;
+  let startPeriod = null;
+  if (start) {
+    const y = start.getFullYear();
+    const m = start.getMonth();
+    startPeriod = y + '-' + String(m + 1).padStart(2, '0');
+    monthDays = new Date(y, m + 1, 0).getDate();
+    const lastDay = new Date(y, m, monthDays, 23, 59, 59);
+    daysInMonth = Math.max(1, Math.min(monthDays, Math.floor((lastDay.getTime() - start.getTime()) / 86400000) + 1));
+    isPartialStartMonth = daysInMonth < monthDays;
+  }
+
+  const currentMonthRow = allRows.find(function(r) { return r.period === currentPeriod; });
+  const completedRows = allRows.filter(function(r) { return r.period !== currentPeriod; });
+
+  let targetRows = [];
+  let basis = [];
+
+  const otherCompletedRows = completedRows.filter(function(r) { return r.period !== startPeriod; });
+
+  if (otherCompletedRows.length > 0) {
+    completedRows.forEach(function(r) {
+      if (r.period === startPeriod && isPartialStartMonth) {
+        basis.push({ period: r.period, qty: Number(r.qty) || 0, prorated: false, excluded: true });
+      } else {
+        targetRows.push(r);
+        basis.push({ period: r.period, qty: Number(r.qty) || 0, prorated: false });
+      }
+    });
+    targetRows = targetRows.slice(-3);
+    const targetPeriods = new Set(targetRows.map(function(r) { return r.period; }));
+    basis = basis.filter(function(b) { return targetPeriods.has(b.period) || b.excluded; });
+  } else if (completedRows.length === 1 && completedRows[0].period === startPeriod) {
+    const r = completedRows[0];
+    if (isPartialStartMonth) {
+      const originalQty = Number(r.qty) || 0;
+      const adjustedQty = originalQty * monthDays / daysInMonth;
+      targetRows.push({
+        period: r.period,
+        qty: adjustedQty,
+        sales_taxin: (Number(r.sales_taxin) || 0) * monthDays / daysInMonth,
+        gross_profit: r.gross_profit !== null && r.gross_profit !== undefined ? (Number(r.gross_profit) || 0) * monthDays / daysInMonth : null,
+        original_row: r
+      });
+      basis.push({ period: r.period, qty: Math.round(adjustedQty), prorated: true });
+    } else {
+      targetRows.push(r);
+      basis.push({ period: r.period, qty: Number(r.qty) || 0, prorated: false });
+    }
+  }
+
+  let provisional = false;
+  let data_ready = targetRows.length > 0;
+
+  if (targetRows.length === 0 && currentMonthRow) {
+    provisional = true;
+    data_ready = true;
+    const y = now.getFullYear();
+    const m = now.getMonth();
+    const daysPassed = now.getDate();
+    const totalDays = new Date(y, m + 1, 0).getDate();
+    const originalQty = Number(currentMonthRow.qty) || 0;
+    const adjustedQty = originalQty * totalDays / daysPassed;
+    
+    targetRows.push({
+      period: currentMonthRow.period,
+      qty: adjustedQty,
+      sales_taxin: (Number(currentMonthRow.sales_taxin) || 0) * totalDays / daysPassed,
+      gross_profit: currentMonthRow.gross_profit !== null && currentMonthRow.gross_profit !== undefined ? (Number(currentMonthRow.gross_profit) || 0) * totalDays / daysPassed : null
+    });
+    basis.push({ period: currentMonthRow.period, qty: Math.round(adjustedQty), prorated: true });
+  }
+
+  const qty = targetRows.reduce(function(s, x) { return s + (Number(x.qty) || 0); }, 0);
+  const sales = targetRows.reduce(function(s, x) { return s + (Number(x.sales_taxin) || 0); }, 0);
+  const profitRows = targetRows.filter(function(x) {
+    const gp = x.original_row ? x.original_row.gross_profit : x.gross_profit;
+    return gp !== null && gp !== undefined && Number(x.sales_taxin);
+  });
+  const profitSales = profitRows.reduce(function(s, x) { return s + (Number(x.sales_taxin) || 0); }, 0);
+  const grossProfit = profitRows.reduce(function(s, x) { return s + (Number(x.gross_profit) || 0); }, 0);
+
+  return {
+    periods: targetRows.map(function(x) { return x.period; }),
+    price: qty > 0 ? sales / qty : null,
+    monthly_sales: targetRows.length ? qty / targetRows.length : null,
+    profit_rate: profitSales ? grossProfit / profitSales : null,
+    qty: qty,
+    sales_taxin: sales,
+    data_ready: data_ready,
+    provisional: provisional,
+    basis: basis
+  };
+}
+
+function buildHypothesisPack_(card, project) {
+  const sim = (card && card.cost_simulation && typeof card.cost_simulation === 'object') ? card.cost_simulation : {};
+  const price = Number(sim.price) || null, net = Number(sim.net);
+  let monthly = Number(sim.monthly_sales || sim.monthly_sold || (card && card.monthly_sales)) || null;
+  const keepa = (card && card.keepa_data && typeof card.keepa_data === 'object') ? card.keepa_data : {};
+  if (!monthly) monthly = Number(((keepa.product_facts || {}).monthly_sold) || keepa.monthlySold) || null;
+  
+  const weakness = String((card && card.weakness) || '').trim();
+  const freeMemo = String((project && project.extra_texts && project.extra_texts.free_memo) || '').trim();
+
+  return {
+    price: price,
+    monthly_sales: monthly,
+    profit_rate: price && isFinite(net) ? net / price : null,
+    thesis: weakness,
+    memo: freeMemo.slice(0, 4000),
+    scores: (card && card.scores) || {},
+    category: (card && card.category) || (project && project.category) || '',
+    fact_pack: keepa
+  };
+}
+
+function deriveVerification_(card, project, lessonsForCard) {
+  const startAt = resolveSaleStartDate_(card), days = startAt ? Math.max(0, Math.floor((Date.now() - startAt.getTime()) / 86400000)) : 0;
+  const lessons = (lessonsForCard || []).slice().sort(function(a,b){return new Date(a.created_at||0)-new Date(b.created_at||0);});
+  const latestLesson = lessons.length ? lessons[lessons.length - 1] : null;
+  return { state:latestLesson ? 'verified' : days >= VERIFY_OBSERVE_DAYS ? 'due' : 'observing', days:days, latestLesson:latestLesson, hypothesis:buildHypothesisPack_(card,project), actual:buildActualPack_(card) };
+}
+
+function priceBand_(price) { const n = Number(price); if (!isFinite(n) || n < 0) return ''; const low = Math.floor(n / PRICE_BAND_SIZE) * PRICE_BAND_SIZE; return low + '-' + (low + PRICE_BAND_SIZE - 1); }
+
+function saveResearchLesson_(lesson) {
+  ensureHeaders_(SHEET_RESEARCH_LESSONS, REQUIRED_HEADERS_RESEARCH_LESSONS);
+  const sheet = getSheetByName_(SHEET_RESEARCH_LESSONS, REQUIRED_HEADERS_RESEARCH_LESSONS), headers = getHeaders_(sheet, REQUIRED_HEADERS_RESEARCH_LESSONS);
+  const jsonCols = new Set(['entry_thesis_tags','hit_json','missed_json','lessons_json','next_seeds_json','hypothesis_snapshot_json','actual_snapshot_json']);
+  sheet.appendRow(headers.map(function(h){ const v=lesson[h]; return jsonCols.has(h) ? JSON.stringify(v == null ? (h.indexOf('snapshot')>=0?{}:[]) : v) : (v == null ? '' : v); }));
+  return lesson;
+}
+
+function validateRetrospective_(value) {
+  if (!value || ['的中','部分的中','外れ'].indexOf(value.verdict) < 0) throw new Error('verdictが不正です。');
+  ['hit_hypotheses','missed_hypotheses','lessons','next_seeds'].forEach(function(k){ if(!Array.isArray(value[k])) throw new Error(k+'が配列ではありません。'); });
+  value.lessons.forEach(function(x){ if(!x || ['sourcing','ad','listing'].indexOf(x.applies_to)<0) throw new Error('lessons.applies_toが不正です。'); });
+  return value;
+}
+
+function requestRetrospectiveFromGemini_(hypothesis, actual) {
+  const prompt = 'あなたは商品リサーチの検証担当です。事実だけを突き合わせ、データにない要因を断定しないでください。外れた仮説を重視してください。JSONのみ返してください。\n'
+    +'【フィールド境界】\n'
+    +'- lessons: 複数案件で再利用できる「条件→帰結」のルール。抽象的でよい。例:「月販予測が競合実績の連動値のみに依存する場合、ニッチ市場では過大になる」。※「〜場合がある」のようなヘッジで終わらせず、どんな場合かを条件側に書く（条件→帰結の形を守ること）。\n'
+    +'- lessons[].tag: applies_to の値（sourcing/ad/listing）を流用せず、テーマを表す短句にする。例: 需要予測、価格帯xページ品質、セット販売、ブランド代替。\n'
+    +'- next_seeds: Amazonの検索窓にそのまま打てる、具体的な商品名の横展開アイデアのみ。例:「熊よけベル」。商品名で言えないもの、判断基準、需要の再定義、調査方法はlessonsへ入れる。該当なしなら必ず空配列[]。\n'
+    +'- 判定質問:「それはAmazonの検索窓に打てる言葉か？」打てないならnext_seedsではなくlessonsである。\n'
+    +'- verdict: 数値の的中・未達を総合して 的中/部分的中/外れ のいずれか。\n'
+    +'入力:'+JSON.stringify({hypothesis_pack:hypothesis,actual_pack:actual})+'\n'
+    +'出力スキーマ:{"verdict":"的中|部分的中|外れ","hit_hypotheses":[{"hypothesis":"","evidence":""}],"missed_hypotheses":[{"hypothesis":"","actual":"","why":""}],"lessons":[{"tag":"","text":"条件→帰結","applies_to":"sourcing|ad|listing"}],"next_seeds":[{"idea":"具体的な商品名","basis":"元実例との共通需要"}]}';
+  const payload={contents:[{parts:[{text:prompt}]}],generationConfig:{temperature:0.1,maxOutputTokens:4096,responseMimeType:'application/json'}};
+  const response=JSON.parse(callGeminiWithRetry(payload));
+  const text=response.candidates && response.candidates[0] && response.candidates[0].content.parts[0].text;
+  return validateRetrospective_(extractJson_(text));
+}
+
+function generateRetrospective_(cardId) {
+  const card=getCardDetail_ProductLifecycle(cardId); if(!card)throw new Error('カードが見つかりません。');
+  const project=findPageProjectByCardId_(cardId), hypothesis=buildHypothesisPack_(card,project), actual=buildActualPack_(card);
+  if(!actual.data_ready)throw new Error('振り返りに必要な販売実績がありません。');
+  let result, lastError; for(let attempt=0;attempt<2;attempt++){try{result=requestRetrospectiveFromGemini_(hypothesis,actual);break;}catch(e){lastError=e;}}
+  if(!result)throw new Error('振り返りのJSON生成に失敗しました。再試行してください。 '+lastError.message);
+  const own=normalizeOwnListingObject_(card.own_listing), now=new Date().toISOString();
+  
+  const own_asin = own.primary_asin || card.asin || own.parent_asin || (own.child_asins || [])[0] || '';
+  const tags = Array.from(new Set(result.lessons.map(function(x){ return x.tag; }).filter(Boolean)));
+  
+  const lesson={lesson_id:Utilities.getUuid(),card_id:card.id,page_project_id:project?project.id:'',own_asin:own_asin,category:hypothesis.category,price_band:priceBand_(actual.price),entry_thesis_tags:tags,verdict:result.verdict,hit_json:result.hit_hypotheses,missed_json:result.missed_hypotheses,lessons_json:result.lessons,next_seeds_json:result.next_seeds,hypothesis_snapshot_json:hypothesis,actual_snapshot_json:actual,generated_by:GEMINI_MODEL,created_at:now};
+  return saveResearchLesson_(lesson);
+}
+
+function getLessonsForCandidate_(factPack) {
+  factPack=factPack||{};
+  const tree=Array.isArray(factPack.category_tree)?factPack.category_tree:[];
+  const names=tree.map(function(x){return String((x&&x.name)||x||'');}).filter(Boolean);
+  const leaf=names[names.length-1]||String(factPack.category||''), parent=names[names.length-2]||'';
+  const band=priceBand_(factPack.price), bandLow=Number(String(band).split('-')[0]);
+  const candidateTags=(Array.isArray(factPack.entry_thesis_tags)?factPack.entry_thesis_tags:(Array.isArray(factPack.thesis_tags)?factPack.thesis_tags:[])).map(String);
+  const cards=getAllCards_ProductLifecycle(), cardMap={}; cards.forEach(function(c){cardMap[String(c.id)]=c;});
+  const results=[];
+  getResearchLessons_().forEach(function(x){
+    const category=String(x.category||''), low=Number(String(x.price_band||'').split('-')[0]); let score=0, matched=[];
+    if(leaf&&category===leaf){score+=3;matched.push('category');}else if(parent&&category.indexOf(parent)>=0){score+=1;matched.push('category');}
+    if(band&&isFinite(low)&&Math.abs(low-bandLow)<=PRICE_BAND_SIZE){score+=2;matched.push('price_band');}
+    const lessonTags=Array.isArray(x.entry_thesis_tags)?x.entry_thesis_tags.map(String):[];
+    if(candidateTags.some(function(t){return lessonTags.indexOf(t)>=0;})){score+=2;matched.push('thesis_tag');}
+    if(!score)return;
+    const card=cardMap[String(x.card_id)]||{}, h=x.hypothesis_snapshot_json||{}, a=x.actual_snapshot_json||{};
+    const start=resolveSaleStartDate_(card), soldDays=start?Math.max(0,Math.floor((Date.now()-start.getTime())/86400000)):0;
+    (Array.isArray(x.lessons_json)?x.lessons_json:[]).forEach(function(lesson){
+      results.push({score:score,lesson_id:x.lesson_id,verdict:x.verdict,lesson:lesson,
+        example:{card_id:x.card_id,title:card.title||category||x.own_asin,own_asin:x.own_asin,
+          hypothesis:{price:h.price==null?null:h.price,monthly_qty:h.monthly_sales==null?null:h.monthly_sales,margin:h.profit_rate==null?null:h.profit_rate},
+          actual:{price:a.price==null?null:a.price,monthly_qty:a.monthly_sales==null?null:a.monthly_sales,margin:a.profit_rate==null?null:a.profit_rate},sold_days:soldDays},
+        matched_on:Array.from(new Set(matched)).join('|'),created_at:x.created_at});
+    });
+  });
+  return results.sort(function(a,b){return b.score-a.score||new Date(b.created_at)-new Date(a.created_at);}).slice(0,5).map(function(x){delete x.score;delete x.created_at;return x;});
+}
+
+function normalizeAsin_(asin) {
+  const value = String(asin || '').trim().toUpperCase();
+  if (!/^[A-Z0-9]{10}$/.test(value)) throw new Error('ASINは10文字の英数字で入力してください。');
+  return value;
+}
+
+// ASINからAmazon.co.jpの商品ページURLを生成する。
+// ATLASの返却値には依存しない。
+function getAmazonProductUrlFromAsin_(asin) {
+  const value = String(asin || '').trim().toUpperCase();
+  return /^[A-Z0-9]{10}$/.test(value)
+    ? 'https://www.amazon.co.jp/dp/' + value
+    : '';
+}
+
+// cardData に ASIN があれば amazon_url を補完する。
+// すでにURLが入っている場合は上書きしない。
+function applyAmazonUrlFromAsin_(cardData) {
+  if (!cardData) return cardData;
+
+  const currentUrl = String(cardData.amazon_url || '').trim();
+  if (currentUrl) return cardData;
+
+  const url = getAmazonProductUrlFromAsin_(cardData.asin);
+  if (url) cardData.amazon_url = url;
+
+  return cardData;
+}
+
+// 既存の product_lifecycle データに amazon_url を一括補完する。
+// 初回反映後にApps Scriptエディタから1回だけ実行する。
+function backfillAmazonUrlsFromAsin() {
+  ensureHeaders_(SHEET_PRODUCT_LIFECYCLE, REQUIRED_HEADERS_LIFECYCLE);
+
+  const sheet = getSheetByName_(
+    SHEET_PRODUCT_LIFECYCLE,
+    REQUIRED_HEADERS_LIFECYCLE
+  );
+
+  const data = sheet.getDataRange().getValues();
+  if (data.length <= 1) {
+    return { checked: 0, updated: 0, skipped: 0 };
+  }
+
+  const headers = getHeaders_(sheet, REQUIRED_HEADERS_LIFECYCLE);
+  const asinIdx = headers.indexOf('asin');
+  const amazonUrlIdx = headers.indexOf('amazon_url');
+
+  if (asinIdx < 0 || amazonUrlIdx < 0) {
+    throw new Error(
+      'product_lifecycle に asin または amazon_url 列が見つかりません。'
+    );
+  }
+
+  let updated = 0;
+  let skipped = 0;
+
+  const values = data.slice(1).map(function(row) {
+    const currentUrl = String(row[amazonUrlIdx] || '').trim();
+    const generatedUrl = getAmazonProductUrlFromAsin_(row[asinIdx]);
+
+    if (!generatedUrl) {
+      skipped++;
+      return [currentUrl];
+    }
+
+    // 手入力済みURLは保持し、空欄だけ埋める
+    if (currentUrl) {
+      return [currentUrl];
+    }
+
+    updated++;
+    return [generatedUrl];
+  });
+
+  if (updated > 0) {
+    sheet.getRange(2, amazonUrlIdx + 1, values.length, 1).setValues(values);
+  }
+
+  return {
+    checked: values.length,
+    updated: updated,
+    skipped: skipped
+  };
+}
+
+function findLifecycleCardByAsin_(asin) {
+  const sheet = getSheetByName_(SHEET_PRODUCT_LIFECYCLE, REQUIRED_HEADERS_LIFECYCLE);
+  const data = sheet.getDataRange().getValues();
+  if (data.length <= 1) return null;
+  const headers = getHeaders_(sheet, REQUIRED_HEADERS_LIFECYCLE);
+  const asinIdx = headers.indexOf('asin');
+  const idIdx = headers.indexOf('id');
+  if (asinIdx < 0 || idIdx < 0) return null;
+  for (let i = 1; i < data.length; i++) {
+    if (String(data[i][asinIdx] || '').trim().toUpperCase() === asin) {
+      return getCardDetail_ProductLifecycle(String(data[i][idIdx] || '').trim());
+    }
+  }
+  return null;
+}
+
+function fetchAtlasCardDraft_(asin) {
+  asin = normalizeAsin_(asin);
+  const existing = findLifecycleCardByAsin_(asin);
+  if (existing) return { status: 'ok', duplicate: true, existingCard: existing };
+  if (!ATLAS_API_URL) throw new Error('ATLAS_API_URL が未設定です。');
+  if (!ATLAS_API_KEY) throw new Error('ATLAS_API_KEY が未設定です。');
+  const response = UrlFetchApp.fetch(ATLAS_API_URL, {
+    method: 'post', contentType: 'text/plain;charset=utf-8',
+    payload: JSON.stringify({ action: 'haksaiCard', key: ATLAS_API_KEY, asin: asin }),
+    muteHttpExceptions: true
+  });
+  const code = response.getResponseCode();
+  const text = response.getContentText();
+  let json;
+  try { json = JSON.parse(text); }
+  catch (err) { throw new Error('ATLASから不正な応答が返されました（HTTP ' + code + '）。'); }
+  if (code < 200 || code >= 300) throw new Error('ATLASへの接続に失敗しました（HTTP ' + code + '）。');
+  if (json.error) throw new Error('ATLASで商品情報を取得できませんでした' + (json.message ? ': ' + json.message : ''));
+  const card = json.data;
+  if (!card || typeof card !== 'object') throw new Error('ATLASの商品データが空です。');
+  card.asin = asin;
+  applyAmazonUrlFromAsin_(card);
+  card.id = 'atlas_' + asin + '_' + Utilities.getUuid();
+  card.status = 'research';
+  card.source = 'ATLAS_ASIN_RESEARCH';
+  card.origin_type = 'research';
+  card.tags = Array.isArray(card.tags) ? card.tags : [];
+  if (card.tags.indexOf('ATLAS') < 0) card.tags.push('ATLAS');
+  if (card.tags.indexOf('Keepa') < 0) card.tags.push('Keepa');
+  return { status: 'ok', duplicate: false, cardData: card };
+}
+
+function saveAtlasCardDraft_(cardData) {
+  if (!cardData || typeof cardData !== 'object') throw new Error('保存するカードデータがありません。');
+  const asin = normalizeAsin_(cardData.asin);
+  const lock = LockService.getScriptLock();
+  lock.waitLock(30000);
+  try {
+    const existing = findLifecycleCardByAsin_(asin);
+    if (existing) return { status: 'ok', duplicate: true, existingCard: existing };
+    cardData.asin = asin;
+    cardData.id = cardData.id || ('atlas_' + asin + '_' + Utilities.getUuid());
+    cardData.status = 'research';
+    cardData.source = 'ATLAS_ASIN_RESEARCH';
+    cardData.origin_type = 'research';
+    saveCardToLifecycle(cardData);
+    return { status: 'ok', duplicate: false, card: cardData };
+  } finally { lock.releaseLock(); }
+}
+
+function decisionCardAuthOk_(body) {
+  const expected = typeof getPackKey_ === 'function' ? getPackKey_() : '';
+  return !!expected && String((body && body.key) || '') === expected;
+}
+
+/**
+ * ATLASの一次スクリーニング結果を商品カルテへUPSERTする。
+ * 人間が後から入力した値は、ATLASが空値を送っても消さない。
+ */
+function upsertDecisionCard_(incoming) {
+  if (!incoming || typeof incoming !== 'object') throw new Error('cardData required');
+  const asin = normalizeAsin_(incoming.asin);
+  const screen = incoming.keepa_data && incoming.keepa_data.decision_screen;
+  if (!screen || screen.pipeline !== 'sourcing-decision') throw new Error('invalid decision_screen');
+
+  const lock = LockService.getScriptLock();
+  lock.waitLock(30000);
+  try {
+    const sheet = getSheetByName_(SHEET_PRODUCT_LIFECYCLE, REQUIRED_HEADERS_LIFECYCLE);
+    const data = sheet.getDataRange().getValues();
+    const headers = getHeaders_(sheet, REQUIRED_HEADERS_LIFECYCLE);
+    const asinIdx = headers.indexOf('asin');
+    let rowIndex = -1;
+    let existing = null;
+    for (let i = 1; i < data.length; i++) {
+      if (String(data[i][asinIdx] || '').trim().toUpperCase() !== asin) continue;
+      const candidate = rowToObject_(headers, data[i], JSON_COLS_LIFECYCLE, OBJECT_JSON_COLS_LIFECYCLE, BOOLEAN_COLS_LIFECYCLE);
+      const priorScreen = candidate.keepa_data && candidate.keepa_data.decision_screen;
+      if ((priorScreen && priorScreen.pipeline === 'sourcing-decision') ||
+          ['ATLAS_SOURCING_DECISION','ATLAS_ASIN_RESEARCH','Seller ATLAS'].indexOf(candidate.source) >= 0) {
+        rowIndex = i + 1; existing = candidate; break;
+      }
+    }
+
+    const now = new Date().toISOString();
+    let card = existing ? mergeDecisionCard_(existing, incoming) : Object.assign({}, incoming);
+    card.asin = asin;
+    card.id = existing ? existing.id : ('atlas_decision_' + asin);
+    card.status = existing && existing.status ? existing.status : 'research';
+    card.source = 'ATLAS_SOURCING_DECISION';
+    card.origin_type = existing && existing.origin_type ? existing.origin_type : 'research';
+    card.created_at = existing && existing.created_at ? existing.created_at : now;
+    card.updated_at = now;
+    card.tags = Array.from(new Set((Array.isArray(card.tags) ? card.tags : []).concat(['ATLAS', 'Keepa', 'SourcingDecision'])));
+    applyAmazonUrlFromAsin_(card);
+
+    const row = buildRowFromHeaders_(headers, card, JSON_COLS_LIFECYCLE, OBJECT_JSON_COLS_LIFECYCLE, BOOLEAN_COLS_LIFECYCLE);
+    if (rowIndex > 0) sheet.getRange(rowIndex, 1, 1, row.length).setValues([row]);
+    else sheet.appendRow(row);
+    upsertDecisionCandidateProjection_(card);
+    return { status: 'ok', action: rowIndex > 0 ? 'updated' : 'created', cardId: card.id, asin: asin };
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+function mergeDecisionCard_(existing, incoming) {
+  const merged = Object.assign({}, existing);
+  // ATLASは事実パックと表示用の自動項目だけ更新できる。
+  // human_input・判断・ページ制作成果は将来フィールドが増えても上書きさせない。
+  const allowed = new Set([
+    'category','title','summary','price','monthly_sales','reviews','emoji','tags','weakness',
+    'audit','produce','scores','urls','asin','parent_asin','amazon_url','keepa_data'
+  ]);
+  Object.keys(incoming).filter(function(key) { return allowed.has(key); }).forEach(function(key) {
+    const value = incoming[key];
+    if (value !== '' && value !== null && value !== undefined) merged[key] = value;
+  });
+  // 後工程の人間入力を保持し、ATLAS管理領域だけを更新する。
+  merged.page_draft = existing.page_draft || {};
+  merged.actual_result = existing.actual_result || {};
+  if (existing.current_landed_cost) merged.current_landed_cost = existing.current_landed_cost;
+  if (existing.supplier_1688_url) merged.supplier_1688_url = existing.supplier_1688_url;
+  return merged;
+}
+
+/** decision_pack互換用。product_lifecycleを正本とし、このシートは投影として扱う。 */
+function upsertDecisionCandidateProjection_(card) {
+  const ss = getSpreadsheet_();
+  let sheet = ss.getSheetByName('keepa_research_candidates');
+  if (!sheet) sheet = ss.insertSheet('keepa_research_candidates');
+  const required = ['asin','fetched_at','category_name','price_min','price_max','amazon_url','keepa_url',
+    'title','brand','status','monthly_sold','offer_count','fba_count','image_count','has_aplus',
+    'source_pipeline','rule_version','screen_result'];
+  if (sheet.getLastRow() === 0) sheet.getRange(1, 1, 1, required.length).setValues([required]);
+  const currentHeaders = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0].map(String);
+  const missing = required.filter(function(h) { return currentHeaders.indexOf(h) < 0; });
+  if (missing.length) sheet.getRange(1, currentHeaders.length + 1, 1, missing.length).setValues([missing]);
+  const headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0].map(String);
+  const pack = card.keepa_data || {}, pf = pack.product_facts || {}, pg = pack.page_facts || {};
+  const mf = pack.market_facts || {}, screen = pack.decision_screen || {};
+  const record = {
+    asin: card.asin, fetched_at: pack.fetched_at || card.updated_at, category_name: card.category || '',
+    price_min: pf.price == null || pf.price === '' ? null : pf.price,
+    price_max: pf.price == null || pf.price === '' ? null : pf.price,
+    amazon_url: card.amazon_url || '', keepa_url: (card.urls || []).filter(function(u){ return String(u).indexOf('keepa.com') >= 0; })[0] || '',
+    title: card.title || pf.title || '', brand: pf.brand || '', status: 'ATLAS候補',
+    monthly_sold: pf.monthly_sold === '' ? null : pf.monthly_sold,
+    offer_count: mf.total_offer_count == null ? null : mf.total_offer_count,
+    fba_count: mf.fba_offer_count == null ? null : mf.fba_offer_count,
+    image_count: pg.image_count == null || pg.image_count === '' ? null : pg.image_count,
+    has_aplus: pg.has_aplus == null ? null : pg.has_aplus,
+    source_pipeline: screen.pipeline, rule_version: screen.rule_version || '', screen_result: screen.result || ''
+  };
+  let targetRow = -1;
+  let existingRow = null;
+  if (sheet.getLastRow() >= 2) {
+    const asinCol = headers.indexOf('asin') + 1;
+    const values = sheet.getRange(2, asinCol, sheet.getLastRow() - 1, 1).getValues();
+    for (let i = 0; i < values.length; i++) {
+      if (String(values[i][0] || '').trim().toUpperCase() === card.asin) {
+        targetRow = i + 2;
+        existingRow = sheet.getRange(targetRow, 1, 1, headers.length).getValues()[0];
+        break;
+      }
+    }
+  }
+  if (existingRow) {
+    const currentStatus = String(existingRow[headers.indexOf('status')] || '').trim();
+    if (currentStatus && currentStatus !== '未確認' && currentStatus !== 'ATLAS候補') record.status = currentStatus;
+  }
+  const row = headers.map(function(h, i) {
+    return Object.prototype.hasOwnProperty.call(record, h) ? record[h] : (existingRow ? existingRow[i] : '');
+  });
+  if (targetRow > 0) sheet.getRange(targetRow, 1, 1, row.length).setValues([row]);
+  else sheet.appendRow(row);
+}
+
+function setAtlasConnection(url, apiKey) {
+  const props = PropertiesService.getScriptProperties();
+  props.setProperty('ATLAS_API_URL', String(url || '').trim());
+  props.setProperty('ATLAS_API_KEY', String(apiKey || '').trim());
+  return 'ATLAS connection saved';
+}
+
 function saveCardToLifecycle(cardData) {
   if (!cardData || !cardData.id) throw new Error('cardData.id がありません。');
+  ensureHeaders_(SHEET_PRODUCT_LIFECYCLE, REQUIRED_HEADERS_LIFECYCLE);
+  applyAmazonUrlFromAsin_(cardData);
+  if (!cardData.keepa_data && cardData.page_draft && cardData.page_draft.atlas_fact_pack) {
+    cardData.keepa_data = cardData.page_draft.atlas_fact_pack;
+  }
   const sheet = getSheetByName_(SHEET_PRODUCT_LIFECYCLE, REQUIRED_HEADERS_LIFECYCLE);
   const headers = getHeaders_(sheet, REQUIRED_HEADERS_LIFECYCLE);
   const now = new Date().toISOString();
   cardData.created_at = cardData.created_at || now;
   cardData.updated_at = cardData.updated_at || now;
   cardData.status = cardData.status || 'research';
+  cardData.origin_type = cardData.origin_type || (cardData.source === 'inventory_import' ? 'import' : 'research');
   cardData.page_draft = cardData.page_draft || {};
   cardData.actual_result = cardData.actual_result || {};
   sheet.appendRow(buildRowFromHeaders_(headers, cardData, JSON_COLS_LIFECYCLE, OBJECT_JSON_COLS_LIFECYCLE, BOOLEAN_COLS_LIFECYCLE));
@@ -465,15 +1405,28 @@ function saveCardToLifecycle(cardData) {
 
 function updateCardInLifecycle(cardData) {
   if (!cardData || !cardData.id) throw new Error('cardData.id がありません。');
+  applyAmazonUrlFromAsin_(cardData);
   const sheet = getSheetByName_(SHEET_PRODUCT_LIFECYCLE, REQUIRED_HEADERS_LIFECYCLE);
   const data = sheet.getDataRange().getValues();
   const headers = getHeaders_(sheet, REQUIRED_HEADERS_LIFECYCLE);
   cardData.updated_at = new Date().toISOString();
-  // page_draft など lifecycle 固有フィールドが未定義の場合は既存値を保持
-  const row = buildRowFromHeaders_(headers, cardData, JSON_COLS_LIFECYCLE, OBJECT_JSON_COLS_LIFECYCLE, BOOLEAN_COLS_LIFECYCLE);
   for (let i = 1; i < data.length; i++) {
     if (String(data[i][0]) === String(cardData.id)) {
+      const stored = rowToObject_(headers, data[i], JSON_COLS_LIFECYCLE, OBJECT_JSON_COLS_LIFECYCLE, BOOLEAN_COLS_LIFECYCLE);
+      if (!cardData.origin_type) cardData.origin_type = stored.origin_type || (cardData.source === 'inventory_import' ? 'import' : 'research');
+      const oldOwnJson = stableOwnListingJson_(stored.own_listing);
+      const newOwnJson = stableOwnListingJson_(cardData.own_listing);
+      const row = buildRowFromHeaders_(headers, cardData, JSON_COLS_LIFECYCLE, OBJECT_JSON_COLS_LIFECYCLE, BOOLEAN_COLS_LIFECYCLE);
+      if (oldOwnJson !== newOwnJson) {
+        const projects = getAllPageProjects();
+        const p = projects.find(function(x) { return String(x.source_card_id) === String(cardData.id); });
+        if (p) {
+          p.own_listing = normalizeOwnListingObject_(cardData.own_listing);
+          if (!updatePageProjectInSheet(p)) throw new Error('ページ制作案件のown_listing同期に失敗しました。');
+        }
+      }
       sheet.getRange(i + 1, 1, 1, row.length).setValues([row]);
+      
       return true;
     }
   }
@@ -607,6 +1560,7 @@ function validateStatusTransition(newStatus, cardData) {
 // page_projects（v5 互換性保持）
 // ============================================
 function getAllPageProjects() {
+  ensureHeaders_(SHEET_PAGE_PROJECTS, REQUIRED_HEADERS_PAGE);
   const sheet = getSheetByName_(SHEET_PAGE_PROJECTS, REQUIRED_HEADERS_PAGE);
   const data = sheet.getDataRange().getValues();
   if (data.length <= 1) return [];
@@ -621,6 +1575,7 @@ function getAllPageProjects() {
 
 function savePageProjectToSheet(projectData) {
   if (!projectData || !projectData.id) throw new Error('projectData.id がありません。');
+  ensureHeaders_(SHEET_PAGE_PROJECTS, REQUIRED_HEADERS_PAGE);
   const sheet = getSheetByName_(SHEET_PAGE_PROJECTS, REQUIRED_HEADERS_PAGE);
   const headers = getHeaders_(sheet, REQUIRED_HEADERS_PAGE);
   const now = new Date().toISOString();
@@ -631,6 +1586,7 @@ function savePageProjectToSheet(projectData) {
 
 function updatePageProjectInSheet(projectData) {
   if (!projectData || !projectData.id) throw new Error('projectData.id がありません。');
+  ensureHeaders_(SHEET_PAGE_PROJECTS, REQUIRED_HEADERS_PAGE);
   const sheet = getSheetByName_(SHEET_PAGE_PROJECTS, REQUIRED_HEADERS_PAGE);
   const data = sheet.getDataRange().getValues();
   const headers = getHeaders_(sheet, REQUIRED_HEADERS_PAGE);
@@ -649,6 +1605,129 @@ function updatePageProjectInSheet(projectData) {
   return false;
 }
 
+function getPageProjectEvents_() {
+  const sheet = getSheetByName_(SHEET_PAGE_EVENTS, REQUIRED_HEADERS_PAGE_EVENTS);
+  const data = sheet.getDataRange().getValues();
+  if (data.length <= 1) return [];
+  const headers = getHeaders_(sheet, REQUIRED_HEADERS_PAGE_EVENTS);
+  return data.slice(1).filter(function(row) { return row[0]; }).map(function(row) {
+    const event = {};
+    headers.forEach(function(h, i) { event[h] = row[i]; });
+    try { event.payload = event.payload_json ? JSON.parse(event.payload_json) : {}; }
+    catch (_) { event.payload = {}; }
+    return event;
+  });
+}
+
+function logPageProjectEvent_(projectId, sourceCardId, eventType, reason, payload, actor) {
+  const sheet = getSheetByName_(SHEET_PAGE_EVENTS, REQUIRED_HEADERS_PAGE_EVENTS);
+  const event = {
+    event_id: Utilities.getUuid(), page_project_id: projectId, source_card_id: sourceCardId || '',
+    event_type: eventType, reason: reason || '', payload_json: JSON.stringify(payload || {}),
+    actor: actor || 'user', created_at: new Date().toISOString()
+  };
+  sheet.appendRow(REQUIRED_HEADERS_PAGE_EVENTS.map(function(h) { return event[h] || ''; }));
+  return event;
+}
+
+function logPageProjectEventOncePerDay_(projectId, eventType, reason, payload) {
+  const project = getAllPageProjects().find(function(p) { return String(p.id) === String(projectId); });
+  if (!project) throw new Error('ページ案件が見つかりません。');
+  const today = new Date().toISOString().slice(0, 10);
+  const exists = getPageProjectEvents_().some(function(e) {
+    return String(e.page_project_id) === String(projectId)
+      && String(e.event_type) === String(eventType)
+      && String(e.created_at || '').slice(0, 10) === today;
+  });
+  return exists ? { duplicate:true } : logPageProjectEvent_(project.id, project.source_card_id, eventType, reason, payload, 'user');
+}
+
+function shelvePageProject_(projectId, reason, wakeAt) {
+  reason = String(reason || '').trim();
+  if (!reason) throw new Error('寝かせ理由を入力してください。');
+  const project = getAllPageProjects().find(function(p) { return String(p.id) === String(projectId); });
+  if (!project) throw new Error('ページ案件が見つかりません。');
+  const prevStatus = project.status || '';
+  const now = new Date().toISOString();
+  project.shelf_state = 'shelved';
+  project.shelved_at = now;
+  project.wake_at = String(wakeAt || '').trim();
+  project.shelf_reason = reason;
+  updatePageProjectInSheet(project);
+  logPageProjectEvent_(project.id, project.source_card_id, 'shelved', reason, { wake_at:project.wake_at, prev_status:prevStatus }, 'user');
+  return project;
+}
+
+function wakePageProject_(projectId, mode, wakeAt) {
+  const project = getAllPageProjects().find(function(p) { return String(p.id) === String(projectId); });
+  if (!project) throw new Error('ページ案件が見つかりません。');
+  mode = String(mode || 'manual');
+  const events = getPageProjectEvents_().filter(function(e) { return String(e.page_project_id) === String(project.id); });
+  const extendCount = events.filter(function(e) { return e.event_type === 'shelf_extended'; }).length;
+  if (mode === 'extend') {
+    const nextWake = String(wakeAt || '').trim();
+    if (!nextWake) throw new Error('次の見直し日を指定してください。');
+    project.shelf_state = 'shelved';
+    project.wake_at = nextWake;
+    updatePageProjectInSheet(project);
+    logPageProjectEvent_(project.id, project.source_card_id, 'shelf_extended', project.shelf_reason || '', { wake_at:nextWake, extend_count:extendCount + 1 }, 'user');
+    return project;
+  }
+  if (mode === 'retire') {
+    const shelvedAt = new Date(project.shelved_at || Date.now());
+    const shelvedDays = Math.max(0, Math.floor((Date.now() - shelvedAt.getTime()) / 86400000));
+    project.shelf_state = '';
+    project.wake_at = '';
+    project.status = '撤退';
+    updatePageProjectInSheet(project);
+    logPageProjectEvent_(project.id, project.source_card_id, 'retired_from_shelf', project.shelf_reason || '', { shelved_days:shelvedDays, extend_count:extendCount }, 'user');
+    return project;
+  }
+  project.shelf_state = '';
+  project.shelved_at = '';
+  project.wake_at = '';
+  project.shelf_reason = '';
+  updatePageProjectInSheet(project);
+  logPageProjectEvent_(project.id, project.source_card_id, 'woke_manual', '', {}, 'user');
+  return project;
+}
+
+function recordDueWakeEvents_(projects) {
+  const now = Date.now(), events = getPageProjectEvents_();
+  (projects || []).forEach(function(project) {
+    const wake = project.shelf_state === 'shelved' && project.wake_at ? new Date(project.wake_at).getTime() : NaN;
+    if (!isFinite(wake) || wake > now) return;
+    const already = events.some(function(e) {
+      return String(e.page_project_id) === String(project.id) && e.event_type === 'woke_due'
+        && String((e.payload || {}).wake_at || '') === String(project.wake_at);
+    });
+    if (!already) logPageProjectEvent_(project.id, project.source_card_id, 'woke_due', project.shelf_reason || '', { wake_at:project.wake_at }, 'system');
+  });
+}
+
+function getShelfDigestForSecretary_(projects) {
+  projects = projects || getAllPageProjects();
+  const events = getPageProjectEvents_(), now = Date.now(), extendCounts = {};
+  events.forEach(function(e) {
+    if (e.event_type === 'shelf_extended') extendCounts[e.page_project_id] = (extendCounts[e.page_project_id] || 0) + 1;
+  });
+  const shelved = projects.filter(function(p) { return p.shelf_state === 'shelved' && p.status !== '撤退'; });
+  const due = shelved.filter(function(p) {
+    const t = p.wake_at ? new Date(p.wake_at).getTime() : NaN;
+    return isFinite(t) && t <= now;
+  });
+  const reviews = events.filter(function(e) { return e.event_type === 'shelf_review_done'; })
+    .sort(function(a,b) { return String(b.created_at).localeCompare(String(a.created_at)); });
+  return {
+    shelved_count:shelved.length,
+    due_count:due.length,
+    due_items:due.map(function(p) { return { id:p.id, title:p.title, shelf_reason:p.shelf_reason, wake_at:p.wake_at }; }),
+    last_review_at:reviews.length ? reviews[0].created_at : '',
+    extend_counts:extendCounts,
+    config:{ stale_days:PAGE_STALE_DAYS, review_interval_days:SHELF_REVIEW_INTERVAL_DAYS, extend_nudge_count:SHELF_EXTEND_NUDGE_COUNT }
+  };
+}
+
 function syncPageDraftToLifecycle(cardId, pageDraft) {
   const sheet = getSheetByName_(SHEET_PRODUCT_LIFECYCLE, REQUIRED_HEADERS_LIFECYCLE);
   const data = sheet.getDataRange().getValues();
@@ -665,6 +1744,9 @@ function syncPageDraftToLifecycle(cardId, pageDraft) {
 }
 
 function createPageProjectFromCard(cardData) {
+  cardData = hydrateAtlasCardForPageProject_(cardData);
+  const atlasFactPack = getAtlasFactPackFromCard_(cardData);
+  const atlasFactText = formatAtlasFactPackForPage_(atlasFactPack);
   if (!cardData || !cardData.id) throw new Error('元カード情報がありません。');
   const now = new Date().toISOString();
   return {
@@ -685,7 +1767,8 @@ function createPageProjectFromCard(cardData) {
     urls: Array.isArray(cardData.urls) ? cardData.urls : [],
     extra_image_ids: [],
     extra_texts: {
-      competitor_reviews: '',
+      competitor_reviews: atlasFactText || '',
+      supplier_url: '',
       supplier_info: '',
       target_notes: '',
       free_memo: ''
@@ -696,7 +1779,8 @@ function createPageProjectFromCard(cardData) {
       bullets: [],
       description: '',
       image_plan: [],
-      backend_keywords: ''
+      backend_keywords: '',
+      atlas_fact_pack: atlasFactPack || null
     },
     memo: '',
     import_decision: {
@@ -704,10 +1788,261 @@ function createPageProjectFromCard(cardData) {
       decision: '',
       reason: ''
     },
+    extracted_input: {},
+    extraction_meta: {},
+    prompt_pack_meta: getActivePageSkillPackInfo_(),
+    sourcing_state: 'needs_search_brief',
+    adopted_candidate_id: '',
+    sourcing_brief: {},
+    sourcing_comparison: {},
+    supplier_selection: {},
+    listing_handoff: {},
+    consultation_memo: '',
+    consultation_memo_updated_at: '',
+    consultation_topics: [],
+    document_role: 'consultation_brief',
+    document_status: 'draft',
+    own_listing: {},
+    research_lineage: { competitor_asins: [atlasFactPack && atlasFactPack.asin, atlasFactPack && atlasFactPack.parent_asin].filter(Boolean), source_card_id: cardData.id },
     initial_order_qty: '50',
     created_at: now,
     updated_at: now
   };
+}
+
+function hydrateAtlasCardForPageProject_(cardData) {
+  if (!cardData || !cardData.id) return cardData || {};
+  const sheet = getSheetByName_(SHEET_PRODUCT_LIFECYCLE, REQUIRED_HEADERS_LIFECYCLE);
+  const data = sheet.getDataRange().getValues();
+  const headers = getHeaders_(sheet, REQUIRED_HEADERS_LIFECYCLE);
+  const jsonCols = [
+    'tags', 'urls', 'audit', 'produce', 'scores', 'checks',
+    'image_drive_ids', 'profit', 'cost_simulation', 'page_draft',
+    'actual_result', 'sales_actual', 'keepa_data'
+  ];
+  const objectCols = [
+    'audit', 'produce', 'scores', 'checks', 'profit',
+    'cost_simulation', 'page_draft', 'actual_result'
+  ];
+  for (let i = 1; i < data.length; i++) {
+    if (String(data[i][0]) === String(cardData.id)) {
+      const full = rowToObject_(headers, data[i], jsonCols, objectCols, BOOLEAN_COLS_LIFECYCLE);
+      return Object.assign({}, full, cardData);
+    }
+  }
+  return cardData;
+}
+
+function getAtlasFactPackFromCard_(cardData) {
+  if (!cardData) return null;
+  if (cardData.keepa_data && cardData.keepa_data.schema_version === 'atlas_keepa_fact_pack_v1') {
+    return cardData.keepa_data;
+  }
+  if (cardData.page_draft && cardData.page_draft.atlas_fact_pack) {
+    return cardData.page_draft.atlas_fact_pack;
+  }
+  return null;
+}
+
+function formatAtlasFactPackForPage_(factPack) {
+  if (!factPack) return '';
+  const pf = factPack.product_facts || {};
+  const pg = factPack.page_facts || {};
+  const mf = factPack.market_facts || {};
+  const af = factPack.atlas_facts || {};
+  const lines = [];
+  lines.push('[Seller ATLAS / Keepa fact pack]');
+  lines.push('ASIN: ' + (factPack.asin || ''));
+  if (pf.title) lines.push('Title: ' + pf.title);
+  if (pf.brand) lines.push('Brand: ' + pf.brand);
+  if (pf.category_tree) lines.push('Category: ' + (Array.isArray(pf.category_tree) ? pf.category_tree.map(function(c){ return c.name || c; }).join(' > ') : pf.category_tree));
+  if (pf.price !== '') lines.push('Price: ' + pf.price);
+  if (pf.monthly_sold !== '') lines.push('Monthly sold: ' + pf.monthly_sold);
+  if (pf.rating !== '') lines.push('Rating: ' + pf.rating);
+  if (pf.review_count !== '') lines.push('Review count: ' + pf.review_count);
+  if (pf.sales_rank_drops_30 !== '') lines.push('Sales rank drops 30d: ' + pf.sales_rank_drops_30);
+  lines.push('');
+  lines.push('Existing bullets from Keepa/Amazon:');
+  (Array.isArray(pg.features) && pg.features.length ? pg.features : ['(none)']).forEach(function(f, i) {
+    lines.push((i + 1) + '. ' + f);
+  });
+  if (pg.description) {
+    lines.push('');
+    lines.push('Description:');
+    lines.push(pg.description);
+  }
+  if (Array.isArray(pg.aplus_modules) && pg.aplus_modules.length) {
+    lines.push('');
+    lines.push('A+ modules:');
+    pg.aplus_modules.forEach(function(m, i) {
+      lines.push('- Module ' + (i + 1));
+      if (m.headline) lines.push('  headline: ' + m.headline);
+      if (Array.isArray(m.text) && m.text.length) lines.push('  text: ' + m.text.join(' / '));
+    });
+  }
+  if (Array.isArray(pg.image_urls) && pg.image_urls.length) {
+    lines.push('');
+    lines.push('Image URLs:');
+    pg.image_urls.slice(0, 12).forEach(function(u) { lines.push('- ' + u); });
+  }
+  lines.push('');
+  lines.push('Page facts: image_count=' + (pg.image_count || '') + ', has_aplus=' + pg.has_aplus + ', has_video=' + pg.has_video);
+  lines.push('Market facts: buy_box_is_amazon=' + mf.buy_box_is_amazon + ', total_offer_count=' + (mf.total_offer_count || ''));
+  lines.push('ATLAS facts: decision=' + (af.decision || '') + ', total_score=' + (af.total_score || '') + ', reason=' + (af.reason || ''));
+  lines.push('');
+  lines.push('Policy: Existing marketplace text is reference material only. Do not copy verbatim into a new listing.');
+  return lines.join('\n');
+}
+
+function debugAtlasPromptInputForAsin(asinOrCardId) {
+  const target = String(asinOrCardId || '').trim();
+  if (!target) throw new Error('asinOrCardId is required.');
+
+  const card = findLifecycleCardForDebug_(target);
+  if (!card) throw new Error('product_lifecycle card not found: ' + target);
+
+  const project = findLatestPageProjectForDebug_(card.id);
+  const factPack = getAtlasFactPackFromCard_(card);
+  const factTextFromCard = formatAtlasFactPackForPage_(factPack);
+  const extraText = project && project.extra_texts ? String(project.extra_texts.competitor_reviews || '') : '';
+  const promptLine = project ? ('- 競合レビュー抜粋: ' + (extraText || 'なし')) : '';
+  const firstFeature = factPack && factPack.page_facts && Array.isArray(factPack.page_facts.features)
+    ? String(factPack.page_facts.features[0] || '')
+    : '';
+
+  const result = {
+    input: target,
+    card: {
+      found: true,
+      id: card.id,
+      asin: card.asin || '',
+      title: card.title || '',
+      source: card.source || '',
+      keepaDataPresent: !!factPack,
+      keepaSchema: factPack ? factPack.schema_version || '' : '',
+      featureCount: factPack && factPack.page_facts && Array.isArray(factPack.page_facts.features)
+        ? factPack.page_facts.features.length
+        : 0,
+      descriptionLength: factPack && factPack.page_facts && factPack.page_facts.description
+        ? String(factPack.page_facts.description).length
+        : 0
+    },
+    pageProject: project ? {
+      found: true,
+      id: project.id,
+      source_card_id: project.source_card_id,
+      extraCompetitorReviewsLength: extraText.length,
+      extraTextContainsAsin: extraText.indexOf(card.asin || target) >= 0,
+      extraTextContainsFirstFeature: firstFeature ? extraText.indexOf(firstFeature.slice(0, 30)) >= 0 : false,
+      pageDraftHasAtlasFactPack: !!(project.page_draft && project.page_draft.atlas_fact_pack),
+      generatedDraftPresent: !!(project.page_draft && project.page_draft.concept)
+    } : {
+      found: false
+    },
+    generatePageDraftPromptInput: {
+      fieldUsedByPrompt: 'projectData.extra_texts.competitor_reviews',
+      willBeIncluded: !!extraText,
+      promptLinePreview: promptLine.slice(0, 2000)
+    },
+    factTextPreviewFromCard: factTextFromCard.slice(0, 2000)
+  };
+
+  Logger.log(JSON.stringify(result, null, 2));
+  return result;
+}
+
+function findLifecycleCardForDebug_(asinOrCardId) {
+  const sheet = getSheetByName_(SHEET_PRODUCT_LIFECYCLE, REQUIRED_HEADERS_LIFECYCLE);
+  const data = sheet.getDataRange().getValues();
+  const headers = getHeaders_(sheet, REQUIRED_HEADERS_LIFECYCLE);
+  const idIdx = headers.indexOf('id');
+  const asinIdx = headers.indexOf('asin');
+  const jsonCols = [
+    'tags', 'urls', 'audit', 'produce', 'scores', 'checks',
+    'image_drive_ids', 'profit', 'cost_simulation', 'page_draft',
+    'actual_result', 'sales_actual', 'keepa_data'
+  ];
+  const objectCols = [
+    'audit', 'produce', 'scores', 'checks', 'profit',
+    'cost_simulation', 'page_draft', 'actual_result'
+  ];
+  const matches = [];
+  for (let i = 1; i < data.length; i++) {
+    const id = idIdx >= 0 ? String(data[i][idIdx] || '').trim() : '';
+    const asin = asinIdx >= 0 ? String(data[i][asinIdx] || '').trim() : '';
+    if (id === asinOrCardId || asin === asinOrCardId) {
+      matches.push(rowToObject_(headers, data[i], jsonCols, objectCols, BOOLEAN_COLS_LIFECYCLE));
+    }
+  }
+  matches.sort(function(a, b) {
+    return new Date(b.updated_at || b.created_at || 0) - new Date(a.updated_at || a.created_at || 0);
+  });
+  return matches[0] || null;
+}
+
+function debugListAtlasCardsForAsin(asin) {
+  asin = String(asin || '').trim();
+  if (!asin) throw new Error('asin is required.');
+
+  const sheet = getSheetByName_(SHEET_PRODUCT_LIFECYCLE, REQUIRED_HEADERS_LIFECYCLE);
+  const data = sheet.getDataRange().getValues();
+  const headers = getHeaders_(sheet, REQUIRED_HEADERS_LIFECYCLE);
+  const asinIdx = headers.indexOf('asin');
+  const sourceIdx = headers.indexOf('source');
+  const jsonCols = [
+    'tags', 'urls', 'audit', 'produce', 'scores', 'checks',
+    'image_drive_ids', 'profit', 'cost_simulation', 'page_draft',
+    'actual_result', 'sales_actual', 'keepa_data'
+  ];
+  const objectCols = [
+    'audit', 'produce', 'scores', 'checks', 'profit',
+    'cost_simulation', 'page_draft', 'actual_result'
+  ];
+
+  const rows = [];
+  for (let i = 1; i < data.length; i++) {
+    if (asinIdx < 0 || String(data[i][asinIdx] || '').trim() !== asin) continue;
+    if (sourceIdx >= 0 && String(data[i][sourceIdx] || '').trim() !== 'Seller ATLAS') continue;
+    const card = rowToObject_(headers, data[i], jsonCols, objectCols, BOOLEAN_COLS_LIFECYCLE);
+    const factPack = getAtlasFactPackFromCard_(card);
+    rows.push({
+      id: card.id,
+      asin: card.asin,
+      title: card.title,
+      created_at: card.created_at,
+      updated_at: card.updated_at,
+      keepaDataPresent: !!factPack,
+      keepaSchema: factPack ? factPack.schema_version || '' : '',
+      featureCount: factPack && factPack.page_facts && Array.isArray(factPack.page_facts.features)
+        ? factPack.page_facts.features.length
+        : 0,
+      hasPageProject: !!findLatestPageProjectForDebug_(card.id)
+    });
+  }
+  rows.sort(function(a, b) {
+    return new Date(b.updated_at || b.created_at || 0) - new Date(a.updated_at || a.created_at || 0);
+  });
+  Logger.log(JSON.stringify(rows, null, 2));
+  return rows;
+}
+
+function findLatestPageProjectForDebug_(sourceCardId) {
+  const sheet = getSheetByName_(SHEET_PAGE_PROJECTS, REQUIRED_HEADERS_PAGE);
+  const data = sheet.getDataRange().getValues();
+  if (data.length <= 1) return null;
+  const headers = getHeaders_(sheet, REQUIRED_HEADERS_PAGE);
+  const sourceIdx = headers.indexOf('source_card_id');
+  const updatedIdx = headers.indexOf('updated_at');
+  const matches = [];
+  for (let i = 1; i < data.length; i++) {
+    if (String(data[i][sourceIdx] || '') === String(sourceCardId)) {
+      matches.push(rowToObject_(headers, data[i], JSON_COLS_PAGE, OBJECT_JSON_COLS_PAGE, BOOLEAN_COLS_PAGE));
+    }
+  }
+  matches.sort(function(a, b) {
+    return new Date(b.updated_at || b.created_at || 0) - new Date(a.updated_at || a.created_at || 0);
+  });
+  return matches[0] || null;
 }
 
 // ============================================
@@ -933,9 +2268,19 @@ ${memoText}
   const cardData = extractJson_(generatedText);
 
   const now = new Date().toISOString();
+
   cardData.id = Utilities.getUuid();
-  cardData.status = cardData.audit && cardData.audit.status ? cardData.audit.status : 'wait';
+
+    if (asin) {
+      cardData.asin = normalizeAsin_(asin);
+      applyAmazonUrlFromAsin_(cardData);
+    }
+
+    cardData.status = cardData.audit && cardData.audit.status
+      ? cardData.audit.status
+      : 'wait';
   cardData.source = 'Amazon';
+  cardData.origin_type = 'research';
   cardData.urls = cardData.urls || [];
   cardData.created_at = now;
   cardData.updated_at = now;
@@ -985,6 +2330,16 @@ ${memoText}
 function generatePageDraft_(projectData, extraImages) {
   const p = projectData || {};
   const extraTexts = p.extra_texts || {};
+  const extractedInput = p.extracted_input || {};
+  const skillPrompt = getActivePageSkillPrompt_();
+  const handoff = p.listing_handoff || {};
+  const isAtlasProject = Array.isArray(p.tags) && p.tags.indexOf('ATLAS') >= 0;
+  const sourcingActivity = !!String(p.adopted_candidate_id || '').trim()
+    || Object.keys(p.sourcing_brief || {}).length > 0
+    || ['supplier_adopted', 'supplier_needs_confirmation'].indexOf(String(p.sourcing_state || '')) >= 0;
+  if ((isAtlasProject || sourcingActivity) && !handoff.ready) {
+    throw new Error('まだ生成できません。理由: 確認済み仕様（listing_handoff）が未確定です。「この解析結果を仕入候補として採用」またはラクマート候補の採用を先に行ってください。');
+  }
 
   const prompt = `あなたはAmazon.co.jp向けの商品ページ制作に強いECコピーライター兼クリエイティブディレクターです。
 HAKSAIは、ノーブランド中で勝つために「実用性重視」「画像で理解させる」「説明すると強い」商品ページを作ります。
@@ -1027,9 +2382,25 @@ HAKSAIは、ノーブランド中で勝つために「実用性重視」「画�
 
 【追加テキスト素材】
 - 競合レビュー抜粋: ${extraTexts.competitor_reviews || 'なし'}
+- 仕入元URL: ${extraTexts.supplier_url || 'なし'}
 - 仕入元情報: ${extraTexts.supplier_info || 'なし'}
 - 狙いたい訴求/ターゲットメモ: ${extraTexts.target_notes || 'なし'}
 - 自由メモ: ${extraTexts.free_memo || p.memo || 'なし'}
+
+【スクリーンショットから抽出した構造化事実】
+${JSON.stringify(extractedInput || {})}
+
+【採用済み仕入候補からのページ制作引き継ぎ】
+${JSON.stringify(handoff || {})}
+
+商品仕様として使用できるのは listing_handoff.confirmed_facts と claim_guard.allowed_claims のみです。
+market_insightsは訴求の優先順位にだけ使い、商品仕様として断定しないでください。
+unconfirmed_itemsとclaim_guard.prohibited_claimsはタイトル・箇条書き・説明・画像文言に使用禁止です。
+
+【交換可能なamazon-listing-pageスキル】
+${skillPrompt || 'スキル未登録。固定ルールのみでドラフトを生成すること。'}
+
+スキル内の手順・Amazon規約・画像プロンプト方針を適用してください。ただし、このプロンプト冒頭の事実保護ルールと下記JSON契約を優先してください。
 
 以下のJSON形式でのみ出力してください。
 
@@ -1053,6 +2424,12 @@ HAKSAIは、ノーブランド中で勝つために「実用性重視」「画�
     }
   ],
   "backend_keywords": "バックエンドキーワード候補を半角スペース区切りで出力"
+  ,"competitor_analysis":{"common_claims":[],"complaints":[],"price_position":"","keyword_trends":[]}
+  ,"keyword_plan":{"main_keyword":"","sub_keywords":[],"long_tail":[]}
+  ,"recommended_title_index":1
+  ,"submission_checklist":{"title_length":0,"backend_keyword_bytes":0,"prohibited_expression_check":[],"main_image_check":[]}
+  ,"generated_by":"${GEMINI_MODEL}"
+  ,"review_status":"draft"
 }
 
 image_plan は必ず 1〜7 の7件を返してください。構成は以下です。
@@ -1086,6 +2463,19 @@ image_plan は必ず 1〜7 の7件を返してください。構成は以下で�
   result.title_candidates = Array.isArray(result.title_candidates) ? result.title_candidates : [];
   result.bullets = Array.isArray(result.bullets) ? result.bullets : [];
   result.image_plan = Array.isArray(result.image_plan) ? result.image_plan : [];
+  result.competitor_analysis = result.competitor_analysis && typeof result.competitor_analysis === 'object' ? result.competitor_analysis : {};
+  result.keyword_plan = result.keyword_plan && typeof result.keyword_plan === 'object' ? result.keyword_plan : {};
+  const aiChecklist = result.submission_checklist && typeof result.submission_checklist === 'object' ? result.submission_checklist : {};
+  result.submission_checklist = Object.assign({}, aiChecklist, {
+    title_lengths: result.title_candidates.map(function(title) { return Array.from(String(title || '')).length; }),
+    title_count: result.title_candidates.length,
+    bullet_count: result.bullets.length,
+    image_plan_count: result.image_plan.length,
+    backend_keyword_bytes: Utilities.newBlob(String(result.backend_keywords || ''), 'text/plain').getBytes().length,
+    calculated_by: 'central-deterministic-checks'
+  });
+  result.generated_by = GEMINI_MODEL;
+  result.review_status = 'draft';
   return result;
 }
 
@@ -1366,9 +2756,11 @@ function bulkRegisterSellingProducts(products) {
       tags: [], supplier_keywords: '', weakness: '', urls: [],
       audit: {}, produce: {}, scores: {}, checks: [], image_drive_ids: [],
       image_drive_id: '', profit: {}, cost_simulation: {}, page_draft: {},
-      gtin: '', amazon_url: '', amazon_published_date: '',
+      gtin: '',
+      amazon_url: getAmazonProductUrlFromAsin_(p.asin),
+      amazon_published_date: '',
       supplier_1688_url: '', rakumart_linkage_status: '', barcode_option: '',
-      current_landed_cost: '', actual_result: {}, source: 'inventory_import',
+      current_landed_cost: '', actual_result: {}, source: 'inventory_import', origin_type: 'import',
       supplier_keywords_json: '',
     };
 
@@ -1487,27 +2879,6 @@ function setupTransactionSheets() {
 function syncTransactions(transactions, periodCosts, periodKey) {
   if (!periodKey) throw new Error('periodKey が必要です。');
 
-  // ── reorder_history を SKU/product_id 別にキャッシュ ──
-  const reorderSheet = getSheetByName_(SHEET_REORDER_HISTORY, REQUIRED_HEADERS_REORDER);
-  const reorderData  = reorderSheet.getDataRange().getValues();
-  const reorderHdrs  = reorderData[0];
-  const rSkuIdx  = reorderHdrs.indexOf('sku');
-  const rPidIdx  = reorderHdrs.indexOf('product_id');
-  const rDateIdx = reorderHdrs.indexOf('order_date');
-  const rCostIdx = reorderHdrs.indexOf('landed_cost_actual');
-
-  const reorderByKey = {};
-  for (let i = 1; i < reorderData.length; i++) {
-    const sku  = String(reorderData[i][rSkuIdx]  || '').trim();
-    const pid  = String(reorderData[i][rPidIdx]  || '').trim();
-    const date = reorderData[i][rDateIdx];
-    const cost = Number(reorderData[i][rCostIdx]) || 0;
-    if (!cost) continue;
-    const key = sku ? sku : ('pid:' + pid);
-    if (!reorderByKey[key]) reorderByKey[key] = [];
-    reorderByKey[key].push({ order_date: date, landed_cost_actual: cost });
-  }
-
   // ── sku_master から {sku: asin} マップ ──
   const skuToAsin = buildSkuToAsinMap_();
 
@@ -1540,8 +2911,9 @@ function syncTransactions(transactions, periodCosts, periodKey) {
     };
   }
 
-  // ── 既存の重複キーを取得 ──
-  const existingKeys = getExistingTransactionKeys_(periodKey);
+  // ── 既存の取込済み明細数をキー別に取得 ──
+  const existingKeyCounts = getExistingTransactionKeyCounts_(periodKey);
+  const incomingKeyCounts = {};
 
   // ── トランザクション集計 ──
   const asinSummary  = {};
@@ -1551,23 +2923,18 @@ function syncTransactions(transactions, periodCosts, periodKey) {
   let noSkuCount     = 0;
 
   transactions.forEach(tx => {
-    const dupKey = `${tx.orderId}__${tx.sku}`;
     if (!tx.sku) { noSkuCount++; return; }
-    if (existingKeys.has(dupKey)) { duplicateCount++; return; }
+    const dupKey = makeTransactionDedupeKey_(tx);
+    const seenInIncoming = incomingKeyCounts[dupKey] || 0;
+    incomingKeyCounts[dupKey] = seenInIncoming + 1;
+    if (seenInIncoming < (existingKeyCounts[dupKey] || 0)) {
+      duplicateCount++;
+      return;
+    }
 
     const asin = skuToAsin[tx.sku] || '';
     const id   = Utilities.getUuid();
     const now  = new Date().toISOString();
-
-    // ── 原価逆引き（SKU優先、なければproduct_idで） ──
-    let landedCost = 0;
-    if (tx.type === '注文') {
-      landedCost = getLandedCostAtDate_(tx.sku, tx.date, reorderByKey);
-      if (!landedCost && asin && asinToLifecycle[asin]) {
-        const pid = asinToLifecycle[asin].productId;
-        landedCost = getLandedCostAtDate_('pid:' + pid, tx.date, reorderByKey);
-      }
-    }
 
     newHistoryRows.push([
       id, tx.orderId, tx.sku, asin, tx.date,
@@ -1576,33 +2943,6 @@ function syncTransactions(transactions, periodCosts, periodKey) {
       tx.discount, tx.points, tx.net,
       String(periodKey), now
     ]);
-
-    if (asin) {
-      if (!asinSummary[asin]) {
-        asinSummary[asin] = {
-          qty:0, salesTaxin:0, fee:0, fbaFee:0,
-          discount:0, points:0, net:0,
-          returnQty:0, returnAmount:0,
-          costLines: []
-        };
-      }
-      const s = asinSummary[asin];
-      if (tx.type === '注文') {
-        s.qty        += tx.qty || 0;
-        s.salesTaxin += tx.salesTaxin || 0;
-        s.fee        += tx.fee || 0;
-        s.fbaFee     += tx.fbaFee || 0;
-        s.discount   += tx.discount || 0;
-        s.points     += tx.points || 0;
-        s.net        += tx.net || 0;
-        if (landedCost > 0) {
-          s.costLines.push({ cost: landedCost, qty: tx.qty || 0 });
-        }
-      } else if (tx.type === '返金') {
-        s.returnQty    += Math.abs(tx.qty || 0);
-        s.returnAmount += tx.net || 0;
-      }
-    }
 
     importedCount++;
   });
@@ -1623,50 +2963,15 @@ function syncTransactions(transactions, periodCosts, periodKey) {
     upsertPeriodCosts_(periodCosts, periodKey);
   }
 
-  // ── product_lifecycle の sales_actual を更新 ──
-  const now = new Date().toISOString();
-  Object.entries(asinSummary).forEach(([asin, s]) => {
-    const lc = asinToLifecycle[asin];
-    if (!lc) return;
-
-    const costQty   = s.costLines.reduce((sum, l) => sum + l.qty, 0);
-    const costTotal = s.costLines.reduce((sum, l) => sum + l.cost * l.qty, 0);
-
-    const coveredNet  = costQty > 0 && s.qty > 0
-      ? s.net * (costQty / s.qty) : 0;
-    const grossProfit = costQty > 0
-      ? Math.round(coveredNet - costTotal) : null;
-    const perUnit     = grossProfit !== null && costQty > 0
-      ? Math.round(grossProfit / costQty) : null;
-
-    const avgLandedCost = costQty > 0 ? Math.round(costTotal / costQty) : 0;
-
-    const newEntry = {
-      period:                periodKey,
-      qty:                   s.qty,
-      sales_taxin:           Math.round(s.salesTaxin),
-      fee:                   Math.round(s.fee),
-      fba_fee:               Math.round(s.fbaFee),
-      discount:              Math.round(s.discount),
-      points:                Math.round(s.points),
-      net:                   Math.round(s.net),
-      landed_cost_used:      avgLandedCost,
-      cost_covered_qty:      costQty,
-      gross_profit:          grossProfit,
-      gross_profit_per_unit: perUnit,
-      return_qty:            s.returnQty,
-      return_amount:         Math.round(s.returnAmount),
-      imported_at:           now
-    };
-
-    const existing = lc.salesActual.filter(e => e.period !== periodKey);
-    existing.push(newEntry);
-    lcSheet.getRange(lc.rowNum, salesActualIdx + 1)
-      .setValue(JSON.stringify(existing));
-  });
+  const refreshed = refreshSalesActualForPeriod_(periodKey);
 
   Logger.log(`syncTransactions: imported=${importedCount}, duplicate=${duplicateCount}, noSku=${noSkuCount}`);
-  return { imported: importedCount, skipped_duplicate: duplicateCount, skipped_no_sku: noSkuCount };
+  return {
+    imported: importedCount,
+    skipped_duplicate: duplicateCount,
+    skipped_no_sku: noSkuCount,
+    sales_actual_refreshed: refreshed.updated
+  };
 }
 
 
@@ -1689,21 +2994,895 @@ function buildSkuToAsinMap_() {
   return map;
 }
 
-// ── transaction_history から既存の重複キーを取得 ──
-function getExistingTransactionKeys_(periodKey) {
+function toNumberOrNull_(value) {
+  if (value === null || value === undefined || value === '') return null;
+  const n = Number(String(value).replace(/[,\s]/g, ''));
+  return isNaN(n) ? null : n;
+}
+
+function parseDate_(value) {
+  if (value instanceof Date && !isNaN(value.getTime())) return value;
+  if (typeof value === 'number' && isFinite(value)) {
+    return new Date(Math.round((value - 25569) * 86400 * 1000));
+  }
+  const raw = String(value || '').trim();
+  if (!raw) return null;
+
+  const normalized = raw
+    .replace(/\s*(JST|UTC|GMT)\s*$/i, '')
+    .replace(/[年月]/g, '/')
+    .replace(/日/g, '')
+    .trim();
+
+  const ymd = normalized.match(/^(\d{4})[\/\-](\d{1,2})[\/\-](\d{1,2})(?:[ T](\d{1,2}):(\d{1,2})(?::(\d{1,2}))?)?/);
+  if (ymd) {
+    return new Date(
+      Number(ymd[1]),
+      Number(ymd[2]) - 1,
+      Number(ymd[3]),
+      Number(ymd[4] || 0),
+      Number(ymd[5] || 0),
+      Number(ymd[6] || 0)
+    );
+  }
+
+  const parsed = new Date(normalized);
+  return isNaN(parsed.getTime()) ? null : parsed;
+}
+
+function txEventTime_(tx) {
+  const d = parseDate_(tx.date);
+  return d ? d.getTime() : Number.POSITIVE_INFINITY;
+}
+
+function makeTransactionDedupeKey_(tx) {
+  return [
+    String(tx.orderId || tx.order_id || '').trim(),
+    String(tx.date || '').trim(),
+    String(tx.sku || '').trim(),
+    String(tx.type || tx.transaction_type || '').trim(),
+    String(Number(tx.qty) || 0),
+    String(Number(tx.net) || 0),
+    String(Number(tx.salesTaxin || tx.sales_taxin) || 0),
+    String(Number(tx.fee) || 0),
+    String(Number(tx.fbaFee || tx.fba_fee) || 0),
+    String(Number(tx.discount) || 0),
+    String(Number(tx.points) || 0)
+  ].join('__');
+}
+
+function readLifecycleMeta_() {
+  const sheet = getSheetByName_(SHEET_PRODUCT_LIFECYCLE, REQUIRED_HEADERS_LIFECYCLE);
+  const data = sheet.getDataRange().getValues();
+  const headers = getHeaders_(sheet, REQUIRED_HEADERS_LIFECYCLE);
+  const idx = name => headers.indexOf(name);
+  const result = {};
+  for (let i = 1; i < data.length; i++) {
+    const asin = String(data[i][idx('asin')] || '').trim();
+    if (!asin) continue;
+    result[asin] = {
+      rowNum: i + 1,
+      productId: String(data[i][idx('id')] || '').trim(),
+      title: String(data[i][idx('title')] || '').trim() || asin,
+      emoji: String(data[i][idx('emoji')] || '').trim() || '📦',
+      subtitle: idx('subtitle') >= 0 ? String(data[i][idx('subtitle')] || '').trim() : '',
+      currentLandedCost: toNumberOrNull_(data[i][idx('current_landed_cost')]),
+      salesActualRaw: idx('sales_actual') >= 0 ? data[i][idx('sales_actual')] : ''
+    };
+  }
+  return result;
+}
+
+function readReorderRows_() {
+  const sheet = getSheetByName_(SHEET_REORDER_HISTORY, REQUIRED_HEADERS_REORDER);
+  const data = sheet.getDataRange().getValues();
+  if (data.length <= 1) return [];
+  const headers = data[0];
+  const idx = name => headers.indexOf(name);
+  return data.slice(1).map(row => {
+    const cost = toNumberOrNull_(row[idx('landed_cost_actual')]);
+    const qty = toNumberOrNull_(row[idx('quantity')]);
+    return {
+      product_id: String(row[idx('product_id')] || '').trim(),
+      sku: String(row[idx('sku')] || '').trim(),
+      date: row[idx('order_date')],
+      time: txEventTime_({ date: row[idx('order_date')] }),
+      qty: qty,
+      unit_cost: cost
+    };
+  }).filter(r => r.qty !== null && r.qty > 0 && r.unit_cost !== null && r.unit_cost > 0);
+}
+
+function readTransactionRows_() {
+  const sheet = getSheetByName_(SHEET_TRANSACTION_HISTORY, REQUIRED_HEADERS_TRANSACTION);
+  const data = sheet.getDataRange().getValues();
+  if (data.length <= 1) return [];
+  const headers = data[0];
+  const idx = name => headers.indexOf(name);
+  return data.slice(1).map((row, offset) => ({
+    rowNum: offset + 2,
+    id: String(row[idx('id')] || '').trim(),
+    orderId: String(row[idx('order_id')] || '').trim(),
+    sku: String(row[idx('sku')] || '').trim(),
+    asin: String(row[idx('asin')] || '').trim(),
+    date: row[idx('date')],
+    type: String(row[idx('transaction_type')] || '').trim(),
+    qty: Number(row[idx('qty')]) || 0,
+    salesTaxin: Number(row[idx('sales_taxin')]) || 0,
+    fee: Number(row[idx('fee')]) || 0,
+    fbaFee: Number(row[idx('fba_fee')]) || 0,
+    discount: Number(row[idx('discount')]) || 0,
+    points: Number(row[idx('points')]) || 0,
+    net: Number(row[idx('net')]) || 0,
+    period: String(row[idx('period_key')] || '').trim()
+  })).filter(tx => tx.sku && tx.period && (tx.type === '注文' || tx.type === '返金'));
+}
+
+function buildCogsLedgerBySku_(sku, reorderRows, txRows, options) {
+  options = options || {};
+  const productId = String(options.productId || '').trim();
+  const fallbackCost = toNumberOrNull_(options.fallbackCost);
+  const periodCogs = {};
+  const periodUnits = {};
+  const costEstimated = {};
+  const perTxCost = {};
+
+  const events = [];
+  reorderRows.forEach(r => {
+    const sameSku = r.sku && r.sku === sku;
+    const pidFallback = !r.sku && productId && r.product_id === productId;
+    if (!sameSku && !pidFallback) return;
+    events.push({ kind: 'RECV', time: r.time, qty: r.qty, unit_cost: r.unit_cost });
+  });
+  txRows.forEach(tx => {
+    if (tx.sku !== sku) return;
+    events.push({
+      kind: tx.type === '返金' ? 'RET' : 'SALE',
+      time: txEventTime_(tx),
+      qty: Math.abs(Number(tx.qty) || 0),
+      period: tx.period,
+      tx
+    });
+  });
+
+  const order = { RECV: 0, RET: 1, SALE: 2 };
+  events.sort((a, b) => (a.time - b.time) || (order[a.kind] - order[b.kind]));
+
+  let qtyOnHand = 0;
+  let invValue = 0;
+  events.forEach(ev => {
+    if (ev.kind === 'RECV') {
+      qtyOnHand += ev.qty;
+      invValue += ev.qty * ev.unit_cost;
+      return;
+    }
+
+    const avg = qtyOnHand > 0 ? invValue / qtyOnHand : null;
+    let unitCost = avg;
+    let estimated = false;
+    if (unitCost === null || !isFinite(unitCost)) {
+      if (fallbackCost !== null && fallbackCost > 0) {
+        unitCost = fallbackCost;
+        estimated = true;
+      } else {
+        unitCost = null;
+      }
+    }
+
+    const period = ev.period;
+    if (!periodCogs[period]) periodCogs[period] = 0;
+    if (!periodUnits[period]) periodUnits[period] = 0;
+
+    if (unitCost !== null) {
+      const amount = ev.qty * unitCost;
+      if (ev.kind === 'SALE') {
+        periodCogs[period] += amount;
+        periodUnits[period] += ev.qty;
+        invValue -= amount;
+        qtyOnHand -= ev.qty;
+      } else {
+        periodCogs[period] -= amount;
+        periodUnits[period] -= ev.qty;
+        invValue += amount;
+        qtyOnHand += ev.qty;
+      }
+      perTxCost[ev.tx.id] = { unitCost, amount, estimated };
+      if (estimated) costEstimated[period] = true;
+    } else {
+      perTxCost[ev.tx.id] = { unitCost: null, amount: null, estimated: false };
+      costEstimated[period] = true;
+      if (ev.kind === 'SALE') qtyOnHand -= ev.qty;
+      else qtyOnHand += ev.qty;
+    }
+  });
+
+  return { perTxCost, periodCogs, periodUnits, costEstimated };
+}
+
+function calculateMovingAverageActuals_() {
+  const skuToAsin = buildSkuToAsinMap_();
+  const asinMeta = readLifecycleMeta_();
+  const reorderRows = readReorderRows_();
+  const txRows = readTransactionRows_().map(tx => {
+    if (!tx.asin && skuToAsin[tx.sku]) tx.asin = skuToAsin[tx.sku];
+    return tx;
+  });
+
+  const byPeriodAsin = {};
+  const ensure = (period, asin) => {
+    const key = period + '__' + asin;
+    if (!byPeriodAsin[key]) {
+      const meta = asinMeta[asin] || {};
+      byPeriodAsin[key] = {
+        period,
+        asin,
+        title: meta.title || asin,
+        subtitle: meta.subtitle || '',
+        emoji: meta.emoji || '📦',
+        qty: 0,
+        salesTaxin: 0,
+        fee: 0,
+        fbaFee: 0,
+        discount: 0,
+        points: 0,
+        net: 0,
+        returnQty: 0,
+        returnAmount: 0,
+        cogs: 0,
+        costUnits: 0,
+        costEstimated: false,
+        hasCost: false
+      };
+    }
+    return byPeriodAsin[key];
+  };
+
+  txRows.forEach(tx => {
+    const asin = tx.asin || skuToAsin[tx.sku] || '';
+    if (!asin) return;
+    const s = ensure(tx.period, asin);
+    if (tx.type === '注文') {
+      s.qty += tx.qty;
+      s.salesTaxin += tx.salesTaxin;
+      s.fee += tx.fee;
+      s.fbaFee += tx.fbaFee;
+      s.discount += tx.discount;
+      s.points += tx.points;
+      s.net += tx.net;
+    } else if (tx.type === '返金') {
+      s.returnQty += Math.abs(tx.qty);
+      s.returnAmount += tx.net;
+      s.salesTaxin += tx.salesTaxin;
+      s.fee += tx.fee;
+      s.fbaFee += tx.fbaFee;
+      s.discount += tx.discount;
+      s.points += tx.points;
+      s.net += tx.net;
+    }
+  });
+
+  const skuSet = {};
+  txRows.forEach(tx => { if (tx.sku) skuSet[tx.sku] = true; });
+  reorderRows.forEach(r => { if (r.sku) skuSet[r.sku] = true; });
+
+  Object.keys(skuSet).forEach(sku => {
+    const asin = skuToAsin[sku] || txRows.find(tx => tx.sku === sku && tx.asin)?.asin || '';
+    const meta = asin ? asinMeta[asin] : null;
+    const ledger = buildCogsLedgerBySku_(sku, reorderRows, txRows, {
+      productId: meta ? meta.productId : '',
+      fallbackCost: meta ? meta.currentLandedCost : null
+    });
+    Object.keys(ledger.periodCogs).forEach(period => {
+      if (!asin) return;
+      const s = ensure(period, asin);
+      const units = ledger.periodUnits[period] || 0;
+      if (units !== 0) {
+        s.cogs += ledger.periodCogs[period] || 0;
+        s.costUnits += units;
+        s.hasCost = true;
+      }
+      if (ledger.costEstimated[period]) s.costEstimated = true;
+    });
+  });
+
+  return { byPeriodAsin, txRows, reorderRows, asinMeta };
+}
+
+function buildSalesActualEntry_(s, importedAt) {
+  const costUnits = s.costUnits || 0;
+  const landedCost = s.hasCost && costUnits > 0 ? s.cogs / costUnits : null;
+  const grossProfit = landedCost !== null ? s.net - s.cogs : null;
+  return {
+    period: s.period,
+    qty: Math.round(s.qty),
+    sales_taxin: Math.round(s.salesTaxin),
+    fee: Math.round(s.fee),
+    fba_fee: Math.round(s.fbaFee),
+    discount: Math.round(s.discount),
+    points: Math.round(s.points),
+    net: Math.round(s.net),
+    landed_cost_used: landedCost !== null ? Math.round(landedCost) : null,
+    cost_covered_qty: costUnits,
+    gross_profit: grossProfit !== null ? Math.round(grossProfit) : null,
+    gross_profit_per_unit: grossProfit !== null && costUnits > 0 ? Math.round(grossProfit / costUnits) : null,
+    cost_estimated: !!s.costEstimated,
+    return_qty: Math.round(s.returnQty),
+    return_amount: Math.round(s.returnAmount),
+    imported_at: importedAt || new Date().toISOString()
+  };
+}
+
+function getPeriodSummaryMovingAverage_(periodKey) {
+  const calc = calculateMovingAverageActuals_();
+  const products = Object.keys(calc.byPeriodAsin)
+    .map(key => calc.byPeriodAsin[key])
+    .filter(s => s.period === periodKey)
+    .map(s => {
+      const entry = buildSalesActualEntry_(s);
+      return {
+        asin: s.asin,
+        title: s.title,
+        subtitle: s.subtitle || '',
+        emoji: s.emoji,
+        current_landed_cost: entry.landed_cost_used,
+        qty: entry.qty,
+        sales_taxin: entry.sales_taxin,
+        fee: entry.fee,
+        fba_fee: entry.fba_fee,
+        net: entry.net,
+        gross_profit: entry.gross_profit,
+        gross_profit_per_unit: entry.gross_profit_per_unit,
+        cost_estimated: entry.cost_estimated,
+        return_qty: entry.return_qty,
+        return_amount: entry.return_amount
+      };
+    })
+    .sort((a, b) => b.sales_taxin - a.sales_taxin);
+
+  attachAdBusinessToProducts_(products, periodKey);
+
+  const costsSheet = getSheetByName_(SHEET_PERIOD_COSTS, REQUIRED_HEADERS_PERIOD_COSTS);
+  const costsData  = costsSheet.getDataRange().getValues();
+  const costsHdrs  = costsData[0];
+  const cPeriod    = costsHdrs.indexOf('period_key');
+  const cType      = costsHdrs.indexOf('cost_type');
+  const cDesc      = costsHdrs.indexOf('description');
+  const cAmount    = costsHdrs.indexOf('amount');
+
+  const costMap = {};
+  for (let i = 1; i < costsData.length; i++) {
+    if (String(costsData[i][cPeriod]) !== periodKey) continue;
+    const ct   = String(costsData[i][cType] || '');
+    const desc = String(costsData[i][cDesc] || '');
+    const amt  = Number(costsData[i][cAmount]) || 0;
+    if (!costMap[ct]) costMap[ct] = { costType: ct, description: desc, amount: 0, count: 0 };
+    costMap[ct].amount += amt;
+    costMap[ct].count++;
+  }
+  const periodCosts = Object.values(costMap);
+
+  const totalSalesTaxin = products.reduce((sum, p) => sum + (p.sales_taxin || 0), 0);
+  const totalNet = products.reduce((sum, p) => sum + (p.net || 0), 0);
+  const totalQty = products.reduce((sum, p) => sum + (p.qty || 0), 0);
+  const totalReturnAmount = products.reduce((sum, p) => sum + (p.return_amount || 0), 0);
+  const totalReturnQty = products.reduce((sum, p) => sum + (p.return_qty || 0), 0);
+  const costSetCount = products.filter(p => p.gross_profit !== null && p.gross_profit !== undefined).length;
+  const uncostProducts = products.filter(p => p.gross_profit === null || p.gross_profit === undefined);
+  const uncostNet = uncostProducts.reduce((sum, p) => sum + (p.net || 0), 0);
+  const totalGrossProfit = products
+    .filter(p => p.gross_profit !== null && p.gross_profit !== undefined)
+    .reduce((sum, p) => sum + p.gross_profit, 0);
+  const totalFixedCosts = periodCosts.reduce((sum, c) => sum + c.amount, 0);
+  const operatingProfit = totalGrossProfit + totalFixedCosts;
+
+  return {
+    periodKey,
+    summary: {
+      totalSalesTaxin: Math.round(totalSalesTaxin),
+      totalNet: Math.round(totalNet),
+      totalGrossProfit,
+      totalFixedCosts: Math.round(totalFixedCosts),
+      operatingProfit,
+      totalReturnAmount: Math.round(totalReturnAmount),
+      totalReturnQty,
+      totalQty,
+      returnRate: totalQty > 0 ? Math.round(totalReturnQty / totalQty * 1000) / 10 : 0,
+      costSetCount,
+      uncostCount: uncostProducts.length,
+      uncostNet: Math.round(uncostNet)
+    },
+    products,
+    periodCosts,
+    dailySales: getDailySales_(periodKey)
+  };
+}
+
+function refreshSalesActualForPeriod_(periodKey) {
+  const calc = calculateMovingAverageActuals_();
+  const lcSheet = getSheetByName_(SHEET_PRODUCT_LIFECYCLE, REQUIRED_HEADERS_LIFECYCLE);
+  const lcHeaders = getHeaders_(lcSheet, REQUIRED_HEADERS_LIFECYCLE);
+  const salesActualIdx = getOrAddLifecycleCol_(lcSheet, lcHeaders, 'sales_actual');
+  const now = new Date().toISOString();
+  let updated = 0;
+
+  Object.keys(calc.byPeriodAsin).forEach(key => {
+    const s = calc.byPeriodAsin[key];
+    if (s.period !== periodKey) return;
+    const meta = calc.asinMeta[s.asin];
+    if (!meta || !meta.rowNum) return;
+
+    let existing = [];
+    try {
+      existing = meta.salesActualRaw ? JSON.parse(meta.salesActualRaw) : [];
+      if (!Array.isArray(existing)) existing = [];
+    } catch(e) {
+      existing = [];
+    }
+
+    const newEntry = buildSalesActualEntry_(s, now);
+    existing = existing.filter(e => String(e.period) !== periodKey);
+    existing.push(newEntry);
+    existing.sort((a, b) => String(a.period).localeCompare(String(b.period)));
+    lcSheet.getRange(meta.rowNum, salesActualIdx + 1).setValue(JSON.stringify(existing));
+    updated++;
+  });
+
+  return { updated };
+}
+
+function createSheetBackup_(sheetName) {
+  const ss = getSpreadsheet_();
+  const sheet = ss.getSheetByName(sheetName);
+  if (!sheet) throw new Error('sheet not found: ' + sheetName);
+  const ts = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'yyyyMMdd_HHmmss');
+  const backup = sheet.copyTo(ss);
+  backup.setName(sheetName + '_backup_' + ts);
+  return backup.getName();
+}
+
+function writeMovingAverageRecalcLog_(rows) {
+  const ss = getSpreadsheet_();
+  const name = 'sales_actual_mavg_recalc_log';
+  let sheet = ss.getSheetByName(name);
+  if (!sheet) sheet = ss.insertSheet(name);
+  sheet.clearContents();
+  const headers = [
+    'checked_at', 'asin', 'period',
+    'old_landed_cost_used', 'new_landed_cost_used',
+    'old_gross_profit', 'new_gross_profit',
+    'old_gross_profit_per_unit', 'new_gross_profit_per_unit',
+    'old_qty', 'new_qty',
+    'cost_estimated'
+  ];
+  sheet.getRange(1, 1, 1, headers.length).setValues([headers]);
+  if (rows.length) sheet.getRange(2, 1, rows.length, headers.length).setValues(rows);
+  return name;
+}
+
+function recalcSalesActualMovingAverage(dryRun, applyActualFields) {
+  dryRun = dryRun !== false;
+  applyActualFields = applyActualFields === true;
+  const calc = calculateMovingAverageActuals_();
+  const lcSheet = getSheetByName_(SHEET_PRODUCT_LIFECYCLE, REQUIRED_HEADERS_LIFECYCLE);
+  const lcHeaders = getHeaders_(lcSheet, REQUIRED_HEADERS_LIFECYCLE);
+  const salesActualIdx = getOrAddLifecycleCol_(lcSheet, lcHeaders, 'sales_actual');
+  const checkedAt = new Date().toISOString();
+  const logRows = [];
+  let changed = 0;
+  const byAsin = {};
+  const backupSheet = dryRun ? '' : createSheetBackup_(SHEET_PRODUCT_LIFECYCLE);
+
+  Object.keys(calc.byPeriodAsin).forEach(key => {
+    const s = calc.byPeriodAsin[key];
+    if (!byAsin[s.asin]) byAsin[s.asin] = [];
+    byAsin[s.asin].push(buildSalesActualEntry_(s, checkedAt));
+  });
+
+  Object.keys(byAsin).forEach(asin => {
+    const meta = calc.asinMeta[asin];
+    if (!meta || !meta.rowNum) return;
+    let existing = [];
+    try {
+      existing = meta.salesActualRaw ? JSON.parse(meta.salesActualRaw) : [];
+      if (!Array.isArray(existing)) existing = [];
+    } catch(e) {
+      existing = [];
+    }
+    const byPeriod = {};
+    existing.forEach(e => { if (e && e.period) byPeriod[String(e.period)] = e; });
+
+    const nextByPeriod = {};
+    existing.forEach(e => { if (e && e.period) nextByPeriod[String(e.period)] = Object.assign({}, e); });
+
+    byAsin[asin].forEach(newEntry => {
+      const old = byPeriod[String(newEntry.period)] || {};
+      const merged = applyActualFields
+        ? Object.assign({}, old, newEntry)
+        : Object.assign({}, old, {
+            period: newEntry.period,
+            landed_cost_used: newEntry.landed_cost_used,
+            cost_covered_qty: newEntry.cost_covered_qty,
+            gross_profit: newEntry.gross_profit,
+            gross_profit_per_unit: newEntry.gross_profit_per_unit,
+            cost_estimated: newEntry.cost_estimated
+          });
+      nextByPeriod[String(newEntry.period)] = merged;
+
+      const costChanged =
+        String(old.landed_cost_used) !== String(newEntry.landed_cost_used) ||
+        String(old.gross_profit) !== String(newEntry.gross_profit) ||
+        String(old.gross_profit_per_unit) !== String(newEntry.gross_profit_per_unit) ||
+        String(old.cost_estimated || false) !== String(newEntry.cost_estimated || false);
+      if (costChanged || Number(old.qty || 0) !== Number(newEntry.qty || 0)) {
+        changed++;
+        logRows.push([
+          checkedAt, asin, newEntry.period,
+          old.landed_cost_used ?? '', newEntry.landed_cost_used ?? '',
+          old.gross_profit ?? '', newEntry.gross_profit ?? '',
+          old.gross_profit_per_unit ?? '', newEntry.gross_profit_per_unit ?? '',
+          old.qty ?? '', newEntry.qty ?? '',
+          newEntry.cost_estimated ? true : false
+        ]);
+      }
+    });
+
+    if (!dryRun) {
+      const next = Object.values(nextByPeriod).sort((a, b) => String(a.period).localeCompare(String(b.period)));
+      lcSheet.getRange(meta.rowNum, salesActualIdx + 1).setValue(JSON.stringify(next));
+    }
+  });
+
+  const logSheet = writeMovingAverageRecalcLog_(logRows);
+  return { dryRun, applyActualFields, changed, logRows: logRows.length, logSheet, backupSheet };
+}
+
+function checkTransactionRepeatedLines() {
+  const txRows = readTransactionRows_();
+  const seen = {};
+  const repeated = [];
+  txRows.forEach(tx => {
+    const key = makeTransactionDedupeKey_(tx);
+    if (!seen[key]) seen[key] = [];
+    seen[key].push({
+      id: tx.id,
+      rowNum: tx.rowNum,
+      orderId: tx.orderId,
+      sku: tx.sku,
+      qty: tx.qty,
+      net: tx.net,
+      period: tx.period
+    });
+  });
+  Object.keys(seen).forEach(key => {
+    if (seen[key].length > 1) repeated.push({ key, lines: seen[key] });
+  });
+  return {
+    repeatedLineGroups: repeated.length,
+    note: 'These are repeated transaction lines, not deletion candidates. Amazon may emit multiple identical-looking lines for multi-unit orders.',
+    repeatedLines: repeated.slice(0, 50)
+  };
+}
+
+function findTransactionRepeatedLineGroups_() {
+  const txRows = readTransactionRows_();
+  const groups = {};
+  txRows.forEach(tx => {
+    const key = makeTransactionDedupeKey_(tx);
+    if (!groups[key]) groups[key] = [];
+    groups[key].push(tx);
+  });
+
+  const repeatedGroups = [];
+  Object.keys(groups).forEach(key => {
+    const rows = groups[key].sort((a, b) => a.rowNum - b.rowNum);
+    if (rows.length <= 1) return;
+    repeatedGroups.push({
+      key,
+      rows
+    });
+  });
+
+  return { repeatedGroups };
+}
+
+function writeTransactionRepeatedLineLog_() {
+  const ss = getSpreadsheet_();
+  const found = findTransactionRepeatedLineGroups_();
+  const name = 'transaction_repeated_lines_log';
+  let sheet = ss.getSheetByName(name);
+  if (!sheet) sheet = ss.insertSheet(name);
+  sheet.clearContents();
+
+  const headers = [
+    'checked_at', 'note',
+    'group_size',
+    'row_num', 'id', 'order_id', 'date', 'sku', 'asin', 'type',
+    'qty', 'sales_taxin', 'fee', 'fba_fee', 'discount', 'points', 'net',
+    'period', 'repeated_line_key'
+  ];
+  sheet.getRange(1, 1, 1, headers.length).setValues([headers]);
+
+  const checkedAt = new Date().toISOString();
+  const note = 'inspection only; not a deletion list';
+  const rows = [];
+  found.repeatedGroups.forEach(group => {
+    group.rows.forEach(tx => {
+      rows.push([
+        checkedAt,
+        note,
+        group.rows.length,
+        tx.rowNum,
+        tx.id,
+        tx.orderId,
+        String(tx.date || ''),
+        tx.sku,
+        tx.asin,
+        tx.type,
+        tx.qty,
+        tx.salesTaxin,
+        tx.fee,
+        tx.fbaFee,
+        tx.discount,
+        tx.points,
+        tx.net,
+        tx.period,
+        group.key
+      ]);
+    });
+  });
+  if (rows.length) sheet.getRange(2, 1, rows.length, headers.length).setValues(rows);
+  return {
+    repeatedLineGroups: found.repeatedGroups.length,
+    logSheet: name,
+    sample: found.repeatedGroups.slice(0, 20).map(group => ({
+      key: group.key,
+      ids: group.rows.map(tx => tx.id),
+      rowNums: group.rows.map(tx => tx.rowNum),
+      qtyTotal: group.rows.reduce((sum, tx) => sum + (Number(tx.qty) || 0), 0)
+    }))
+  };
+}
+
+function debugMovingAverageForSku(sku) {
+  sku = String(sku || '').trim();
+  if (!sku) throw new Error('sku required');
+  const skuToAsin = buildSkuToAsinMap_();
+  const asinMeta = readLifecycleMeta_();
+  const reorderRows = readReorderRows_();
+  const txRows = readTransactionRows_().map(tx => {
+    if (!tx.asin && skuToAsin[tx.sku]) tx.asin = skuToAsin[tx.sku];
+    return tx;
+  });
+  const asin = skuToAsin[sku] || txRows.find(tx => tx.sku === sku && tx.asin)?.asin || '';
+  const meta = asin ? asinMeta[asin] : null;
+  const ledger = buildCogsLedgerBySku_(sku, reorderRows, txRows, {
+    productId: meta ? meta.productId : '',
+    fallbackCost: meta ? meta.currentLandedCost : null
+  });
+  const periods = Object.keys(ledger.periodCogs).sort().map(period => {
+    const units = ledger.periodUnits[period] || 0;
+    return {
+      period,
+      units,
+      cogs: ledger.periodCogs[period],
+      moving_avg_used: units > 0 ? Math.round(ledger.periodCogs[period] / units) : null,
+      cost_estimated: !!ledger.costEstimated[period]
+    };
+  });
+  return { sku, asin, periods };
+}
+
+function diagnoseMovingAverageCostCoverage(periodKey) {
+  periodKey = String(periodKey || '').trim();
+  const calc = calculateMovingAverageActuals_();
+  const rows = Object.keys(calc.byPeriodAsin)
+    .map(key => calc.byPeriodAsin[key])
+    .filter(s => !periodKey || s.period === periodKey)
+    .map(s => {
+      const entry = buildSalesActualEntry_(s);
+      const soldUnits = Number(entry.qty) || 0;
+      const returnUnits = Number(entry.return_qty) || 0;
+      const expectedCostUnits = Math.max(0, soldUnits - returnUnits);
+      const coveredUnits = Number(entry.cost_covered_qty) || 0;
+      let status = 'costed';
+      if (expectedCostUnits > 0 && coveredUnits <= 0) status = 'uncosted';
+      else if (expectedCostUnits > 0 && coveredUnits < expectedCostUnits) status = 'partial';
+      else if (entry.cost_estimated) status = 'estimated';
+      return {
+        period: s.period,
+        asin: s.asin,
+        title: s.title,
+        subtitle: s.subtitle || '',
+        qty: soldUnits,
+        return_qty: returnUnits,
+        expected_cost_qty: expectedCostUnits,
+        cost_covered_qty: coveredUnits,
+        uncovered_qty: Math.max(0, expectedCostUnits - coveredUnits),
+        net: entry.net,
+        landed_cost_used: entry.landed_cost_used,
+        gross_profit: entry.gross_profit,
+        gross_profit_per_unit: entry.gross_profit_per_unit,
+        cost_estimated: entry.cost_estimated,
+        status
+      };
+    })
+    .sort((a, b) => {
+      const rank = { uncosted: 0, partial: 1, estimated: 2, costed: 3 };
+      return (rank[a.status] - rank[b.status]) ||
+        String(a.period).localeCompare(String(b.period)) ||
+        ((b.net || 0) - (a.net || 0));
+    });
+
+  const summary = rows.reduce((acc, row) => {
+    acc.products++;
+    acc.qty += row.qty || 0;
+    acc.net += row.net || 0;
+    acc[row.status] = (acc[row.status] || 0) + 1;
+    if (row.status !== 'costed') {
+      acc.problemProducts++;
+      acc.problemQty += row.qty || 0;
+      acc.problemNet += row.net || 0;
+    }
+    return acc;
+  }, {
+    periodKey: periodKey || 'ALL',
+    products: 0,
+    qty: 0,
+    net: 0,
+    costed: 0,
+    estimated: 0,
+    partial: 0,
+    uncosted: 0,
+    problemProducts: 0,
+    problemQty: 0,
+    problemNet: 0
+  });
+
+  return {
+    summary,
+    problemRows: rows.filter(r => r.status !== 'costed').slice(0, 200),
+    topUncostedByNet: rows
+      .filter(r => r.status === 'uncosted' || r.status === 'partial')
+      .sort((a, b) => (b.net || 0) - (a.net || 0))
+      .slice(0, 50)
+  };
+}
+
+function diagnoseMissingCostSources(periodKey) {
+  periodKey = String(periodKey || '').trim();
+  const coverage = diagnoseMovingAverageCostCoverage(periodKey);
+  const problemAsins = {};
+  coverage.problemRows.forEach(row => { problemAsins[row.asin] = row; });
+
+  const skuToAsin = buildSkuToAsinMap_();
+  const asinMeta = readLifecycleMeta_();
+  const txRows = readTransactionRows_().filter(tx => !periodKey || tx.period === periodKey);
+  const reorderRows = readReorderRows_();
+
+  const txByAsin = {};
+  txRows.forEach(tx => {
+    const asin = tx.asin || skuToAsin[tx.sku] || '';
+    if (!asin || !problemAsins[asin]) return;
+    if (!txByAsin[asin]) txByAsin[asin] = {};
+    if (!txByAsin[asin][tx.sku]) {
+      txByAsin[asin][tx.sku] = { sku: tx.sku, orderQty: 0, returnQty: 0, net: 0 };
+    }
+    const s = txByAsin[asin][tx.sku];
+    if (tx.type === '注文') s.orderQty += tx.qty || 0;
+    else if (tx.type === '返金') s.returnQty += Math.abs(tx.qty || 0);
+    s.net += tx.net || 0;
+  });
+
+  const reorderBySku = {};
+  const reorderByPid = {};
+  reorderRows.forEach(r => {
+    if (r.sku) {
+      if (!reorderBySku[r.sku]) reorderBySku[r.sku] = [];
+      reorderBySku[r.sku].push(r);
+    }
+    if (r.product_id) {
+      if (!reorderByPid[r.product_id]) reorderByPid[r.product_id] = [];
+      reorderByPid[r.product_id].push(r);
+    }
+  });
+
+  const rows = Object.keys(problemAsins).map(asin => {
+    const problem = problemAsins[asin];
+    const meta = asinMeta[asin] || {};
+    const skuRows = Object.values(txByAsin[asin] || {}).map(s => {
+      const skuReorders = reorderBySku[s.sku] || [];
+      const pidReorders = meta.productId ? (reorderByPid[meta.productId] || []) : [];
+      const latestSku = skuReorders.slice().sort((a, b) => b.time - a.time)[0] || null;
+      const latestPid = pidReorders.slice().sort((a, b) => b.time - a.time)[0] || null;
+      return {
+        sku: s.sku,
+        order_qty: s.orderQty,
+        return_qty: s.returnQty,
+        net: Math.round(s.net),
+        reorder_by_sku_count: skuReorders.length,
+        reorder_by_product_id_count: pidReorders.length,
+        latest_sku_landed_cost: latestSku ? latestSku.unit_cost : null,
+        latest_sku_order_date: latestSku ? String(latestSku.date).slice(0, 10) : '',
+        latest_product_landed_cost: latestPid ? latestPid.unit_cost : null,
+        latest_product_order_date: latestPid ? String(latestPid.date).slice(0, 10) : ''
+      };
+    });
+
+    let cause = 'unknown';
+    const hasCurrent = meta.currentLandedCost !== null && meta.currentLandedCost > 0;
+    const hasAnyReorder = skuRows.some(s => s.reorder_by_sku_count > 0 || s.reorder_by_product_id_count > 0);
+    if (!meta.productId) cause = 'missing_product_lifecycle';
+    else if (!hasCurrent && !hasAnyReorder) cause = 'no_current_landed_cost_and_no_reorder_history';
+    else if (!hasAnyReorder) cause = 'no_reorder_history';
+    else if (!hasCurrent) cause = 'no_current_landed_cost_fallback';
+
+    return {
+      period: problem.period,
+      asin,
+      title: problem.title,
+      status: problem.status,
+      qty: problem.qty,
+      return_qty: problem.return_qty,
+      expected_cost_qty: problem.expected_cost_qty,
+      uncovered_qty: problem.uncovered_qty,
+      net: problem.net,
+      current_landed_cost: meta.currentLandedCost,
+      product_id: meta.productId || '',
+      cause,
+      skus: skuRows
+    };
+  }).sort((a, b) => (b.net || 0) - (a.net || 0));
+
+  const causeSummary = rows.reduce((acc, row) => {
+    acc[row.cause] = (acc[row.cause] || 0) + 1;
+    return acc;
+  }, {});
+
+  return {
+    periodKey: periodKey || 'ALL',
+    summary: coverage.summary,
+    causeSummary,
+    rows: rows.slice(0, 200)
+  };
+}
+
+// ── transaction_history から既存の取込済み明細数をキー別に取得 ──
+function getExistingTransactionKeyCounts_(periodKey) {
   const sheet = getSheetByName_(SHEET_TRANSACTION_HISTORY, REQUIRED_HEADERS_TRANSACTION);
   const data  = sheet.getDataRange().getValues();
-  if (data.length <= 1) return new Set();
+  if (data.length <= 1) return {};
   const headers   = data[0];
   const orderIdx  = headers.indexOf('order_id');
   const skuIdx    = headers.indexOf('sku');
   const periodIdx = headers.indexOf('period_key');
-  const keys = new Set();
+  const dateIdx   = headers.indexOf('date');
+  const typeIdx   = headers.indexOf('transaction_type');
+  const qtyIdx    = headers.indexOf('qty');
+  const salesIdx  = headers.indexOf('sales_taxin');
+  const feeIdx    = headers.indexOf('fee');
+  const fbaIdx    = headers.indexOf('fba_fee');
+  const discIdx   = headers.indexOf('discount');
+  const ptsIdx    = headers.indexOf('points');
+  const netIdx    = headers.indexOf('net');
+  const counts = {};
   for (let i = 1; i < data.length; i++) {
     if (String(data[i][periodIdx]) !== periodKey) continue;
-    keys.add(`${data[i][orderIdx]}__${data[i][skuIdx]}`);
+    const key = makeTransactionDedupeKey_({
+      orderId: data[i][orderIdx],
+      date: data[i][dateIdx],
+      sku: data[i][skuIdx],
+      type: data[i][typeIdx],
+      qty: data[i][qtyIdx],
+      salesTaxin: data[i][salesIdx],
+      fee: data[i][feeIdx],
+      fbaFee: data[i][fbaIdx],
+      discount: data[i][discIdx],
+      points: data[i][ptsIdx],
+      net: data[i][netIdx]
+    });
+    counts[key] = (counts[key] || 0) + 1;
   }
-  return keys;
+  return counts;
 }
 
 // ── period_costs upsert ──
@@ -1760,6 +3939,7 @@ function getOrAddLifecycleCol_(sheet, headers, colName) {
 // ============================================
 function getPeriodSummary(periodKey) {
   if (!periodKey) throw new Error('periodKey が必要です。');
+  return getPeriodSummaryMovingAverage_(periodKey);
 
   // ── reorder_history を SKU/product_id 別にキャッシュ ──
   const reorderSheet = getSheetByName_(SHEET_REORDER_HISTORY, REQUIRED_HEADERS_REORDER);
@@ -2217,4 +4397,26 @@ function saveComparisonReport_(filename, content) {
     fileName: file.getName(),
     viewUrl:  file.getUrl(),
   };
+}
+
+function getAsinList_() {
+  const ss = getSpreadsheet_();
+  const sheet = ss.getSheetByName(SHEET_SKU_MASTER);
+  if (!sheet) return [];
+  const data = sheet.getDataRange().getValues();
+  if (data.length <= 1) return [];
+  const headers = data[0];
+  const asinIdx = headers.indexOf('asin');
+  const nameIdx = headers.indexOf('product_name');
+  
+  const list = [];
+  const seen = new Set();
+  for (let i = 1; i < data.length; i++) {
+    const asin = String(data[i][asinIdx] || '').trim().toUpperCase();
+    const name = String(data[i][nameIdx] || '').trim();
+    if (!asin || seen.has(asin)) continue;
+    seen.add(asin);
+    list.push({ asin: asin, name: name || asin });
+  }
+  return list;
 }
