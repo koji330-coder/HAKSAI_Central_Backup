@@ -1,0 +1,468 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: #f6f5f1;
+      color: #202124;
+      font-family: Arial, "Noto Sans JP", sans-serif;
+      font-size: 14px;
+      line-height: 1.5;
+    }
+    main {
+      max-width: 920px;
+      margin: 0 auto;
+      padding: 18px;
+    }
+    header {
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+      gap: 16px;
+      margin-bottom: 14px;
+    }
+    h1 {
+      margin: 0;
+      font-size: 22px;
+      line-height: 1.25;
+      letter-spacing: 0;
+    }
+    h2 {
+      margin: 0 0 12px;
+      font-size: 16px;
+      letter-spacing: 0;
+    }
+    section {
+      background: #ffffff;
+      border: 1px solid #d9d7cf;
+      border-radius: 8px;
+      padding: 16px;
+      margin-bottom: 14px;
+    }
+    .status {
+      min-width: 120px;
+      border: 1px solid #c8c4b8;
+      border-radius: 999px;
+      padding: 5px 10px;
+      text-align: center;
+      font-size: 12px;
+      font-weight: 700;
+      background: #eef6ee;
+      color: #1f6f3a;
+    }
+    .status.bad {
+      background: #fff3e0;
+      color: #8a4b00;
+    }
+    .dropzone {
+      border: 2px dashed #8c8a82;
+      background: #faf9f5;
+      min-height: 180px;
+      border-radius: 8px;
+      display: grid;
+      place-items: center;
+      text-align: center;
+      padding: 18px;
+      cursor: pointer;
+      transition: border-color .15s, background .15s;
+    }
+    .dropzone.dragover {
+      border-color: #1967d2;
+      background: #eef4ff;
+    }
+    .dropzone strong {
+      display: block;
+      font-size: 17px;
+      margin-bottom: 6px;
+    }
+    .subtle {
+      color: #6b6a65;
+      font-size: 12px;
+    }
+    .rules {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 10px;
+      margin-top: 12px;
+    }
+    .rule {
+      border: 1px solid #e2dfd6;
+      border-radius: 8px;
+      padding: 10px;
+      background: #fcfbf8;
+    }
+    .rule b {
+      display: block;
+      margin-bottom: 3px;
+    }
+    input[type="file"] {
+      display: none;
+    }
+    .actions {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 8px;
+    }
+    button {
+      min-height: 40px;
+      border: 1px solid #c6c4bd;
+      border-radius: 8px;
+      background: #ffffff;
+      color: #202124;
+      font-weight: 700;
+      cursor: pointer;
+    }
+    button:disabled {
+      color: #8b8980;
+      background: #f0efeb;
+      cursor: not-allowed;
+    }
+    .input-panel {
+      display: none;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 8px;
+      margin-top: 10px;
+      padding: 10px;
+      border: 1px solid #e2dfd6;
+      border-radius: 8px;
+      background: #fcfbf8;
+    }
+    .input-panel.visible {
+      display: grid;
+    }
+    label.field {
+      display: grid;
+      gap: 4px;
+      font-size: 12px;
+      color: #5f5d56;
+    }
+    input[type="text"], input[type="number"], input[type="date"] {
+      min-height: 38px;
+      width: 100%;
+      border: 1px solid #c8c4b8;
+      border-radius: 8px;
+      padding: 7px 9px;
+      font: inherit;
+      background: #ffffff;
+      color: #202124;
+    }
+    .results {
+      margin-top: 14px;
+      border-top: 1px solid #ece9df;
+    }
+    .row {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 10px;
+      padding: 10px 0;
+      border-bottom: 1px solid #ece9df;
+      align-items: center;
+    }
+    .row-name {
+      min-width: 0;
+      overflow-wrap: anywhere;
+    }
+    .badge {
+      border-radius: 999px;
+      padding: 4px 8px;
+      font-size: 12px;
+      font-weight: 700;
+      white-space: nowrap;
+      background: #edf2fa;
+      color: #174ea6;
+    }
+    .badge.ok { background: #e6f4ea; color: #137333; }
+    .badge.warn { background: #fef7e0; color: #8a4b00; }
+    .badge.err { background: #fce8e6; color: #a50e0e; }
+    .empty {
+      padding: 14px 0 0;
+      color: #77746b;
+      font-size: 13px;
+    }
+    pre {
+      overflow: auto;
+      margin: 0;
+      background: #f5f4ef;
+      border-radius: 8px;
+      padding: 10px;
+      font-size: 12px;
+    }
+    @media (max-width: 720px) {
+      main { padding: 14px; }
+      header { display: block; }
+      .status { display: inline-block; margin-top: 10px; }
+      .rules, .actions, .input-panel { grid-template-columns: 1fr; }
+      .dropzone { min-height: 150px; }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <div>
+        <h1>HAKSAI 着地原価・請求書管理</h1>
+        <div class="subtle">Excelと請求書を投入する専用Webアプリ</div>
+      </div>
+      <div id="setupBadge" class="status">確認中</div>
+    </header>
+
+    <section>
+      <h2>ファイル投入</h2>
+      <label id="dropzone" class="dropzone" for="fileInput">
+        <span>
+          <strong>ここにドラッグ&ドロップ</strong>
+          <span class="subtle">スマホではタップしてファイルを選択</span>
+        </span>
+      </label>
+      <input id="fileInput" type="file" multiple>
+      <div class="rules">
+        <div class="rule">
+          <b>.xlsx / .xls</b>
+          <span class="subtle">01_ラクマートEXCEL入庫</span>
+        </div>
+        <div class="rule">
+          <b>.pdf / .jpg / .png</b>
+          <span class="subtle">02_請求書インボックス</span>
+        </div>
+      </div>
+      <div id="results" class="results">
+        <div class="empty">投入結果がここに表示されます。</div>
+      </div>
+    </section>
+
+    <section>
+      <h2>実行</h2>
+      <div class="actions">
+        <button id="invoiceButton">インボックス取込</button>
+        <button id="organizeButton">確認済みを整理</button>
+        <button id="excelButton">Excel計算実行</button>
+        <button id="syncDryRunButton">CENTRAL同期 dry-run</button>
+        <button id="paymentButton">支払期限を確認</button>
+      </div>
+      <div id="needInputPanel" class="input-panel">
+        <label class="field">
+          請求書金額
+          <input id="invoiceAmountInput" type="number" min="0" step="1">
+        </label>
+        <label class="field">
+          請求書日付
+          <input id="invoiceIssueDateInput" type="date">
+        </label>
+        <button id="resumeExcelButton">入力して再実行</button>
+      </div>
+      <div class="actions" style="margin-top:8px;">
+        <button id="syncCommitButton" disabled>CENTRALへ本同期</button>
+      </div>
+      <div id="actionOutput" class="subtle" style="margin-top:10px;">本同期はdry-runで同期予定が出た後だけ実行できます。</div>
+    </section>
+
+    <section>
+      <h2>セットアップ状態</h2>
+      <pre id="setupJson"><?= JSON.stringify(setupStatus, null, 2) ?></pre>
+    </section>
+  </main>
+
+  <script>
+    const initialSetup = <?!= JSON.stringify(setupStatus) ?>;
+    const MAX_BYTES_FALLBACK = 20 * 1024 * 1024;
+    let maxUploadBytes = MAX_BYTES_FALLBACK;
+
+    const dropzone = document.getElementById('dropzone');
+    const fileInput = document.getElementById('fileInput');
+    const results = document.getElementById('results');
+    const setupBadge = document.getElementById('setupBadge');
+    const setupJson = document.getElementById('setupJson');
+    const invoiceButton = document.getElementById('invoiceButton');
+    const organizeButton = document.getElementById('organizeButton');
+    const excelButton = document.getElementById('excelButton');
+    const syncDryRunButton = document.getElementById('syncDryRunButton');
+    const paymentButton = document.getElementById('paymentButton');
+    const syncCommitButton = document.getElementById('syncCommitButton');
+    const needInputPanel = document.getElementById('needInputPanel');
+    const invoiceAmountInput = document.getElementById('invoiceAmountInput');
+    const invoiceIssueDateInput = document.getElementById('invoiceIssueDateInput');
+    const resumeExcelButton = document.getElementById('resumeExcelButton');
+    const actionOutput = document.getElementById('actionOutput');
+    let lastNeedInput = null;
+    let lastDryRunReady = 0;
+
+    function setSetupStatus(status) {
+      setupBadge.textContent = status.configured ? 'セットアップ済み' : '未セットアップ';
+      setupBadge.classList.toggle('bad', !status.configured);
+      setupJson.textContent = JSON.stringify(status, null, 2);
+    }
+
+    function getKind(fileName) {
+      const ext = (fileName.split('.').pop() || '').toLowerCase();
+      if (['xlsx', 'xls'].includes(ext)) return 'excel';
+      if (['pdf', 'jpg', 'jpeg', 'png'].includes(ext)) return 'invoice';
+      return '';
+    }
+
+    function addResult(fileName, message, type) {
+      if (results.querySelector('.empty')) results.innerHTML = '';
+      const row = document.createElement('div');
+      row.className = 'row';
+      const name = document.createElement('div');
+      name.className = 'row-name';
+      name.textContent = fileName;
+      const badge = document.createElement('div');
+      badge.className = 'badge ' + (type || '');
+      badge.textContent = message;
+      row.appendChild(name);
+      row.appendChild(badge);
+      results.appendChild(row);
+      return badge;
+    }
+
+    function readFileAsDataUrl(file) {
+      return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(String(reader.result || ''));
+        reader.onerror = () => reject(reader.error || new Error('FileReader error'));
+        reader.readAsDataURL(file);
+      });
+    }
+
+    function gasUpload(payload) {
+      return new Promise((resolve, reject) => {
+        google.script.run
+          .withSuccessHandler(resolve)
+          .withFailureHandler(reject)
+          .uploadFile(payload);
+      });
+    }
+
+    function gasCall(fnName) {
+      return new Promise((resolve, reject) => {
+        google.script.run
+          .withSuccessHandler(resolve)
+          .withFailureHandler(reject)[fnName]();
+      });
+    }
+
+    function gasCallWithArg(fnName, arg) {
+      return new Promise((resolve, reject) => {
+        google.script.run
+          .withSuccessHandler(resolve)
+          .withFailureHandler(reject)[fnName](arg || {});
+      });
+    }
+
+    function renderActionResult(result) {
+      actionOutput.textContent = JSON.stringify(result, null, 2);
+      if (result && result.status === 'NEED_INPUT' && result.need === 'invoice_amount') {
+        lastNeedInput = result;
+        needInputPanel.classList.add('visible');
+        invoiceAmountInput.focus();
+      } else {
+        lastNeedInput = null;
+        needInputPanel.classList.remove('visible');
+      }
+      if (result && result.dryRun && Number(result.readyToSync || 0) > 0) {
+        lastDryRunReady = Number(result.readyToSync || 0);
+        syncCommitButton.disabled = false;
+      }
+    }
+
+    async function runAction(button, fnName, arg) {
+      const oldText = button.textContent;
+      button.disabled = true;
+      button.textContent = '実行中';
+      actionOutput.textContent = '';
+      try {
+        const result = arg === undefined ? await gasCall(fnName) : await gasCallWithArg(fnName, arg);
+        renderActionResult(result);
+      } catch (error) {
+        actionOutput.textContent = error && error.message ? error.message : String(error);
+      } finally {
+        button.disabled = false;
+        button.textContent = oldText;
+      }
+    }
+
+    async function uploadFiles(fileList) {
+      const files = Array.from(fileList || []);
+      for (const file of files) {
+        const kind = getKind(file.name);
+        if (!kind) {
+          addResult(file.name, '対象外', 'err');
+          continue;
+        }
+        if (file.size > maxUploadBytes) {
+          addResult(file.name, '20MB超過', 'err');
+          continue;
+        }
+
+        const badge = addResult(file.name, '処理中', '');
+        try {
+          const dataUrl = await readFileAsDataUrl(file);
+          const result = await gasUpload({
+            name: file.name,
+            mimeType: file.type || 'application/octet-stream',
+            base64: dataUrl,
+            kind
+          });
+          badge.className = 'badge ' + (result.status === 'DUP_SKIP' ? 'warn' : 'ok');
+          badge.textContent = result.status;
+        } catch (error) {
+          badge.className = 'badge err';
+          badge.textContent = '失敗';
+          const detail = document.createElement('div');
+          detail.className = 'subtle';
+          detail.textContent = error && error.message ? error.message : String(error);
+          badge.parentElement.querySelector('.row-name').appendChild(detail);
+        }
+      }
+      fileInput.value = '';
+    }
+
+    ['dragenter', 'dragover'].forEach(eventName => {
+      dropzone.addEventListener(eventName, event => {
+        event.preventDefault();
+        dropzone.classList.add('dragover');
+      });
+    });
+    ['dragleave', 'drop'].forEach(eventName => {
+      dropzone.addEventListener(eventName, event => {
+        event.preventDefault();
+        dropzone.classList.remove('dragover');
+      });
+    });
+    dropzone.addEventListener('drop', event => uploadFiles(event.dataTransfer.files));
+    fileInput.addEventListener('change', event => uploadFiles(event.target.files));
+    invoiceButton.addEventListener('click', () => runAction(invoiceButton, 'runInvoiceInbox'));
+    organizeButton.addEventListener('click', () => runAction(organizeButton, 'runOrganizeConfirmedInvoices'));
+    excelButton.addEventListener('click', () => runAction(excelButton, 'runImportCost', {}));
+    paymentButton.addEventListener('click', () => runAction(paymentButton, 'runCheckPaymentDue'));
+    resumeExcelButton.addEventListener('click', () => {
+      const amount = invoiceAmountInput.value;
+      const issueDate = invoiceIssueDateInput.value;
+      runAction(resumeExcelButton, 'runImportCost', {
+        invoiceAmount: amount,
+        invoiceIssueDate: issueDate
+      });
+    });
+    syncDryRunButton.addEventListener('click', () => runAction(syncDryRunButton, 'runSyncToReorderHistoryDryRun'));
+    syncCommitButton.addEventListener('click', () => {
+      if (!lastDryRunReady) return;
+      const ok = confirm('dry-runで同期予定 ' + lastDryRunReady + ' 件を確認済みです。CENTRALへ本同期しますか？');
+      if (!ok) return;
+      syncCommitButton.disabled = true;
+      runAction(syncCommitButton, 'runSyncToReorderHistory', { dryRun: false });
+    });
+
+    setSetupStatus(initialSetup);
+    google.script.run
+      .withSuccessHandler(config => {
+        maxUploadBytes = config.maxUploadBytes || MAX_BYTES_FALLBACK;
+        setSetupStatus(config.setupStatus || initialSetup);
+      })
+      .withFailureHandler(() => setSetupStatus(initialSetup))
+      .getClientConfig();
+  </script>
+</body>
+</html>

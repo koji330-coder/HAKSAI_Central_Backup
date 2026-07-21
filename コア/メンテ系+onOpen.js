@@ -1,4 +1,26 @@
-function onOpen() {
+function onOpen(e) {
+  try {
+    addHaksaiMaintenanceMenu_();
+  } catch (err) {
+    Logger.log('HAKSAIメンテ menu failed: ' + (err && err.stack ? err.stack : err));
+    SpreadsheetApp.getUi()
+      .createMenu('HAKSAIメンテ')
+      .addItem('メニュー初期化エラーをログ出力', 'logHaksaiMenuError_')
+      .addToUi();
+  }
+
+  try {
+    if (typeof addResearchReviewMenu_ === 'function') addResearchReviewMenu_();
+  } catch (err) {
+    Logger.log('HAKSAI AIレビュー menu failed: ' + (err && err.stack ? err.stack : err));
+  }
+}
+
+function onInstall(e) {
+  onOpen(e);
+}
+
+function addHaksaiMaintenanceMenu_() {
   SpreadsheetApp.getUi()
     .createMenu('🔧 HAKSAIメンテ')
     .addItem('📋 マニュアルを開く', 'showManualSidebar')
@@ -12,6 +34,10 @@ function onOpen() {
         .addItem('計算できていない商品を抽出', 'exportUncalculatedProducts')
         .addItem('原価を一括登録（uncalculated取込）', 'importFromUncalculated')
         .addItem('原価を一括登録（missing_skus取込）', 'importFromMissingSkus')
+        .addSeparator()
+        .addItem('平均原価の原価不足を抽出', 'exportMovingAverageCostIssues')
+        .addItem('平均原価の原価入力を確認（dryRun）', 'importMovingAverageCostIssues')
+        .addItem('平均原価の原価入力を反映', 'applyMovingAverageCostIssues')
     )
     .addSubMenu(
       SpreadsheetApp.getUi().createMenu('③ SKUマスター補完')
@@ -38,11 +64,26 @@ function onOpen() {
     )
     .addSubMenu(
       SpreadsheetApp.getUi().createMenu('⑥ AI相談カルテ')
-        .addItem('🧾 AI相談新商品相談カルテ生成', 'addResearchReviewMenu')
+        .addItem('🧾 AI相談新商品相談カルテ生成', 'showResearchReviewSidebar')
+    )
+    .addSubMenu(
+      SpreadsheetApp.getUi().createMenu('⑦ 期首在庫')
+        .addItem('2026-01-01 期首在庫シートを作成', 'createOpeningInventory20260101')
+        .addItem('2026-01-01 登録前プレビュー', 'previewOpeningInventory20260101')
+        .addSeparator()
+        .addItem('2026-01-01 期首在庫を本番登録', 'applyOpeningInventory20260101')
+    )
+    .addSubMenu(
+      SpreadsheetApp.getUi().createMenu('⑧ 発注履歴整理')
+        .addItem('整理プレビューを作成', 'createReorderHistoryCleanupPreview20260101')
+        .addSeparator()
+        .addItem('整理を本番反映', 'applyReorderHistoryCleanup20260101')
     )
     .addToUi();
+}
 
-  addResearchReviewMenu_();
+function logHaksaiMenuError_() {
+  Logger.log('HAKSAIメンテ menu failed. Apps Script の実行ログを確認してください。');
 }
 
 function showManualSidebar() {

@@ -270,3 +270,33 @@ function recordBoxMovement(boxId, identifier, type, qty, memo) {
   return { status: 'ok', boxId, fnsku, asin, freeLabel, type, qty };
 }
 
+/** 全箱を商品別に集約。箱は保管場所情報として返す。 */
+function getHomeInventoryOverview_() {
+  setupBoxSheetsIfMissing_();
+  const ss=getSpreadsheet_(), itemSh=ss.getSheetByName(SHEET_BOX_ITEMS), boxSh=ss.getSheetByName(SHEET_BOXES);
+  const boxes={};
+  if(boxSh&&boxSh.getLastRow()>1){const d=boxSh.getDataRange().getValues(),h=d[0].map(String);d.slice(1).forEach(function(r){if(r[h.indexOf('box_id')])boxes[String(r[h.indexOf('box_id')])]={location:String(r[h.indexOf('location')]||''),memo:String(r[h.indexOf('memo')]||'')};});}
+  const map={};
+  if(itemSh&&itemSh.getLastRow()>1){const d=itemSh.getDataRange().getValues(),h=d[0].map(String);d.slice(1).forEach(function(r){
+    const asin=String(r[h.indexOf('asin')]||'').trim().toUpperCase(),fnsku=String(r[h.indexOf('fnsku')]||'').trim(),name=String(r[h.indexOf('product_name')]||'').trim(),boxId=String(r[h.indexOf('box_id')]||'HOME-UNSORTED'),qty=Number(r[h.indexOf('qty')])||0,updated=r[h.indexOf('updated_at')]||'';
+    const key=asin||fnsku||String(r[h.indexOf('free_label')]||'').trim();if(!key)return;const x=map[key]||(map[key]={key:key,asin:asin,fnsku:fnsku,product_name:name,home_qty:0,fba_stock:0,locations:[],updated_at:''});x.home_qty+=qty;if(!x.asin&&asin)x.asin=asin;if(!x.fnsku&&fnsku)x.fnsku=fnsku;if(!x.product_name&&name)x.product_name=name;if(qty>0)x.locations.push({box_id:boxId,location:(boxes[boxId]||{}).location||'',qty:qty});if(String(updated)>String(x.updated_at))x.updated_at=updated;
+  });}
+  const lc=secRows_('product_lifecycle');lc.forEach(function(r){const asin=String(r.asin||'').trim().toUpperCase();if(!asin)return;const launched=['true','1','yes'].indexOf(String(r.is_launched||'').toLowerCase())>=0||String(r.status||'').toLowerCase()==='selling';if(!launched&&!map[asin])return;const x=map[asin]||(map[asin]={key:asin,asin:asin,fnsku:'',product_name:'',home_qty:0,fba_stock:0,locations:[],updated_at:''});x.product_name=x.product_name||([r.title,r.subtitle].filter(Boolean).join(' / '));x.fba_stock=Number(r.fba_stock)||0;});
+  const sm=ss.getSheetByName(SHEET_SKU_MASTER);if(sm&&sm.getLastRow()>1){const d=sm.getDataRange().getValues(),h=d[0].map(String);d.slice(1).forEach(function(r){const asin=String(r[h.indexOf('asin')]||'').trim().toUpperCase(),fn=String(r[h.indexOf('fnsku')]||'').trim();if(asin&&map[asin]&&!map[asin].fnsku)map[asin].fnsku=fn;});}
+  return {products:Object.keys(map).map(function(k){return map[k];}).sort(function(a,b){return b.home_qty-a.home_qty||String(a.product_name).localeCompare(String(b.product_name),'ja');}),boxes:Object.keys(boxes).map(function(id){return{box_id:id,location:boxes[id].location,memo:boxes[id].memo};})};
+}
+
+function setupBoxSheetsIfMissing_(){const ss=getSpreadsheet_();[[SHEET_BOXES,REQUIRED_HEADERS_BOXES],[SHEET_BOX_ITEMS,REQUIRED_HEADERS_BOX_ITEMS],[SHEET_BOX_LOG,REQUIRED_HEADERS_BOX_LOG]].forEach(function(x){let sh=ss.getSheetByName(x[0]);if(!sh){sh=ss.insertSheet(x[0]);sh.getRange(1,1,1,x[1].length).setValues([x[1]]);}});}
+
+/** 商品・保管場所単位の数量を絶対値で更新する。 */
+function setHomeInventoryQuantity_(data) {
+  data=data||{};setupBoxSheetsIfMissing_();const ss=getSpreadsheet_(),sh=ss.getSheetByName(SHEET_BOX_ITEMS),boxSh=ss.getSheetByName(SHEET_BOXES);
+  const asin=String(data.asin||'').trim().toUpperCase(),fnsku=String(data.fnsku||'').trim(),boxId=String(data.box_id||'HOME-UNSORTED').trim()||'HOME-UNSORTED',name=String(data.product_name||asin||fnsku).trim(),qty=Math.max(0,Math.floor(Number(data.qty)||0));if(!asin&&!fnsku)throw new Error('ASINまたはFNSKUが必要です。');
+  const bd=boxSh.getDataRange().getValues(),bh=bd[0].map(String);if(!bd.slice(1).some(function(r){return String(r[bh.indexOf('box_id')])===boxId;}))boxSh.appendRow([boxId,boxId==='HOME-UNSORTED'?'自宅・未分類':'',boxId==='HOME-UNSORTED'?'一括登録用':'',new Date().toISOString()]);
+  const d=sh.getDataRange().getValues(),h=d[0].map(String),now=new Date().toISOString();let rowNo=0;
+  for(let i=1;i<d.length;i++){if(String(d[i][h.indexOf('box_id')])!==boxId)continue;const same=asin?String(d[i][h.indexOf('asin')]||'').toUpperCase()===asin:String(d[i][h.indexOf('fnsku')]||'')===fnsku;if(same){rowNo=i+1;break;}}
+  const row=[Utilities.getUuid(),boxId,fnsku,asin,'',name,qty,now];if(rowNo)sh.getRange(rowNo,1,1,REQUIRED_HEADERS_BOX_ITEMS.length).setValues([row]);else sh.appendRow(row);
+  return {asin:asin,fnsku:fnsku,box_id:boxId,qty:qty,updated_at:now};
+}
+
+function bulkSetHomeInventory_(rows){rows=Array.isArray(rows)?rows:[];if(!rows.length)throw new Error('登録行がありません。');if(rows.length>500)throw new Error('一度に登録できるのは500行までです。');return{updated:rows.map(setHomeInventoryQuantity_).length};}
