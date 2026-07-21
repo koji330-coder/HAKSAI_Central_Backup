@@ -235,7 +235,57 @@ function doGet(e) {
       });
       return jsonResponse({ status: 'ok', rowData: rowObj });
     }
+    if (action === 'getMasterData') {
+      const ss = getSpreadsheet_();
+      const skuSheet = ss.getSheetByName('SKU_Master') || ss.getSheetByName('sku_master');
+      let skuMaster = [];
+      if (skuSheet) {
+        const vals = skuSheet.getDataRange().getValues();
+        const headers = vals[0].map(h => String(h).trim().toLowerCase());
+        const skuIdx = headers.indexOf('sku');
+        const asinIdx = headers.indexOf('asin');
+        const titleIdx = headers.indexOf('title') !== -1 ? headers.indexOf('title') : headers.indexOf('商品名');
+        const costIdx = headers.indexOf('cost') !== -1 ? headers.indexOf('cost') : headers.indexOf('仕入原価');
+        const fbaIdx = headers.indexOf('fbafee') !== -1 ? headers.indexOf('fbafee') : headers.indexOf('fba手数料');
+        
+        for (let i = 1; i < vals.length; i++) {
+          const sku = String(vals[i][skuIdx] || '').trim();
+          if (!sku) continue;
+          skuMaster.push({
+            sku: sku,
+            asin: asinIdx !== -1 ? String(vals[i][asinIdx] || '').trim() : '',
+            title: titleIdx !== -1 ? String(vals[i][titleIdx] || '').trim() : '商品名未登録',
+            cost: costIdx !== -1 ? Number(vals[i][costIdx]) || 0 : 0,
+            fbaFee: fbaIdx !== -1 ? Number(vals[i][fbaIdx]) || 0 : 0,
+            emoji: '📦'
+          });
+        }
+      }
+
+      const costSheet = ss.getSheetByName('Period_Costs') || ss.getSheetByName('period_costs');
+      let fixedCosts = [];
+      if (costSheet) {
+        const vals = costSheet.getDataRange().getValues();
+        const headers = vals[0].map(h => String(h).trim().toLowerCase());
+        const typeIdx = headers.indexOf('cost_type');
+        const descIdx = headers.indexOf('description');
+        const amtIdx = headers.indexOf('amount');
+        
+        for (let i = 1; i < vals.length; i++) {
+          const type = typeIdx !== -1 ? String(vals[i][typeIdx] || '') : 'その他';
+          const amt = amtIdx !== -1 ? Number(vals[i][amtIdx]) || 0 : 0;
+          if (!type && amt === 0) continue;
+          fixedCosts.push({
+            type: type,
+            desc: descIdx !== -1 ? String(vals[i][descIdx] || '') : '',
+            amount: amt
+          });
+        }
+      }
+      return jsonResponse({ status: 'ok', skuMaster, fixedCosts });
+    }
     if (action === 'getCards') return jsonResponse({ status: 'ok', cards: getAllCards_ProductLifecycle() });
+    if (action === 'getResearchCommandCenter') return jsonResponse({ status: 'ok', data: getResearchCommandCenterData_() });
     if (action === 'getResearchLessons') return jsonResponse({ status: 'ok', data: getResearchLessons_() });
     if (action === 'getCardDetail') {
       const id = e.parameter.id || '';
@@ -291,6 +341,10 @@ function doGet(e) {
       return jsonResponse({ status: 'ok', data: diagnoseMissingCostSources(e.parameter.periodKey || '') });
     }
 
+    if (action === 'getManualCostFallbacks') {
+      return jsonResponse({ status: 'ok', data: getManualCostFallbacks_() });
+    }
+
     if (action === 'getAvailablePeriods') {
       return jsonResponse({ status: 'ok', periods: getAvailablePeriods() });
     }
@@ -314,6 +368,10 @@ function doGet(e) {
 
     if (action === 'getInboundPlan') {
       return jsonResponse({ status: 'ok', data: getInboundPlan() });
+    }
+
+    if (action === 'getReorderManagementData') {
+      return jsonResponse({ status: 'ok', data: getReorderManagementData_() });
     }
 
     if (action === 'debugLastInventory') {
@@ -385,6 +443,31 @@ function doGet(e) {
 
     if (action === 'getAsinList') {
       return jsonResponse({ status: 'ok', list: getAsinList_() });
+    }
+
+    if (action === 'getProductCatalog') {
+      return jsonResponse({ status: 'ok', data: getProductCatalog_() });
+    }
+    if (action === 'getProductGrowthData') {
+      return jsonResponse({ status: 'ok', data: getProductGrowthData_(e.parameter.asin || '', e.parameter.days || '30', e.parameter.endDate || '') });
+    }
+    if (action === 'getProductMonthlyData') {
+      return jsonResponse({ status: 'ok', data: getProductMonthlyData_(e.parameter.asin || '', e.parameter.months || '12', e.parameter.endPeriod || '') });
+    }
+    if (action === 'getProductActions') {
+      return jsonResponse({ status: 'ok', data: getProductActions_(e.parameter.asin || '', e.parameter.includeArchived === 'true') });
+    }
+    if (action === 'getListingSnapshot') {
+      return jsonResponse({ status: 'ok', data: getListingSnapshot_(e.parameter.asin || '') });
+    }
+    if (action === 'getProductMarketHistory') {
+      return jsonResponse({ status: 'ok', data: getProductMarketHistory_(e.parameter.asin || '', e.parameter.days || '30', e.parameter.endDate || '') });
+    }
+    if (action === 'getProductConsultations') {
+      return jsonResponse({ status: 'ok', data: getProductConsultations_(e.parameter.asin || '') });
+    }
+    if (action === 'getProductConsultation') {
+      return jsonResponse({ status: 'ok', data: getProductConsultation_(e.parameter.sessionId || '') });
     }
 
     if (action === 'decision_pack') return packAuthOk_(e) ? doGetDecisionPack_(e) : packDeny_();
@@ -573,6 +656,22 @@ function doPost(e) {
       return jsonResponse({ status: 'ok', data: result });
     }
 
+    if (action === 'createDomesticOrder') {
+      return jsonResponse({ status: 'ok', data: createDomesticOrder_(body.order || {}) });
+    }
+
+    if (action === 'updateDomesticOrder') {
+      return jsonResponse({ status: 'ok', data: updateDomesticOrder_(body.orderId || '', body.order || {}) });
+    }
+
+    if (action === 'cancelDomesticOrder') {
+      return jsonResponse({ status: 'ok', data: cancelDomesticOrder_(body.orderId || '') });
+    }
+
+    if (action === 'receiveDomesticOrder') {
+      return jsonResponse({ status: 'ok', data: receiveDomesticOrder_(body.orderId || '', body.actualArrivalDate || '') });
+    }
+
     if (action === 'bulkRegisterSellingProducts') {
       const result = bulkRegisterSellingProducts(body.products || []);
       return jsonResponse({ status: 'ok', data: result });
@@ -581,6 +680,35 @@ function doPost(e) {
     if (action === 'syncTransactions') {
       const result = syncTransactions(body.transactions || [], body.periodCosts || [], body.periodKey || '');
       return jsonResponse({ status: 'ok', data: result });
+    }
+
+    if (action === 'upsertManualCostFallback') {
+      return jsonResponse({ status: 'ok', data: upsertManualCostFallback_(body.item || {}) });
+    }
+
+    if (action === 'saveProductAction') {
+      return jsonResponse({ status: 'ok', data: saveProductAction_(body.item || {}, body.images || []) });
+    }
+    if (action === 'archiveProductAction') {
+      return jsonResponse({ status: 'ok', data: archiveProductAction_(body.actionId || '') });
+    }
+    if (action === 'updateProductActionReview') {
+      return jsonResponse({ status: 'ok', data: updateProductActionReview_(body.item || {}) });
+    }
+    if (action === 'refreshOwnListingSnapshot') {
+      return jsonResponse({ status: 'ok', data: refreshOwnListingSnapshot_(body.asin || '') });
+    }
+    if (action === 'refreshProductMarketHistory') {
+      return jsonResponse({ status: 'ok', data: refreshProductMarketHistory_(body.asin || '', body.days || 365) });
+    }
+    if (action === 'consultProductGrowthMaika') {
+      return jsonResponse({ status: 'ok', data: consultProductGrowthMaika_(body.input || {}, body.images || []) });
+    }
+    if (action === 'sendProductConsultationMessage') {
+      return jsonResponse({ status: 'ok', data: sendProductConsultationMessage_(body.input || {}, body.images || []) });
+    }
+    if (action === 'saveProductContextNote') {
+      return jsonResponse({ status: 'ok', data: saveProductContextNote_(body.input || {}) });
     }
 
     if (action === 'recalcSalesActualMovingAverage') {
@@ -663,6 +791,10 @@ function doPost(e) {
 
     if (action === 'syncAdProductReport') {
           return jsonResponse({ status:'ok', data: syncAdProductReport(body.rows||[], body.rawBase64||'', body.filename||'') });
+    }
+
+    if (action === 'previewAdProductReport') {
+          return jsonResponse({ status:'ok', data: previewAdProductReport(body.rows||[]) });
     }
 
     if (action === 'syncBusinessReport') {
@@ -1328,7 +1460,6 @@ function upsertDecisionCard_(incoming) {
     const row = buildRowFromHeaders_(headers, card, JSON_COLS_LIFECYCLE, OBJECT_JSON_COLS_LIFECYCLE, BOOLEAN_COLS_LIFECYCLE);
     if (rowIndex > 0) sheet.getRange(rowIndex, 1, 1, row.length).setValues([row]);
     else sheet.appendRow(row);
-    upsertDecisionCandidateProjection_(card);
     return { status: 'ok', action: rowIndex > 0 ? 'updated' : 'created', cardId: card.id, asin: asin };
   } finally {
     lock.releaseLock();
@@ -1353,58 +1484,6 @@ function mergeDecisionCard_(existing, incoming) {
   if (existing.current_landed_cost) merged.current_landed_cost = existing.current_landed_cost;
   if (existing.supplier_1688_url) merged.supplier_1688_url = existing.supplier_1688_url;
   return merged;
-}
-
-/** decision_pack互換用。product_lifecycleを正本とし、このシートは投影として扱う。 */
-function upsertDecisionCandidateProjection_(card) {
-  const ss = getSpreadsheet_();
-  let sheet = ss.getSheetByName('keepa_research_candidates');
-  if (!sheet) sheet = ss.insertSheet('keepa_research_candidates');
-  const required = ['asin','fetched_at','category_name','price_min','price_max','amazon_url','keepa_url',
-    'title','brand','status','monthly_sold','offer_count','fba_count','image_count','has_aplus',
-    'source_pipeline','rule_version','screen_result'];
-  if (sheet.getLastRow() === 0) sheet.getRange(1, 1, 1, required.length).setValues([required]);
-  const currentHeaders = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0].map(String);
-  const missing = required.filter(function(h) { return currentHeaders.indexOf(h) < 0; });
-  if (missing.length) sheet.getRange(1, currentHeaders.length + 1, 1, missing.length).setValues([missing]);
-  const headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0].map(String);
-  const pack = card.keepa_data || {}, pf = pack.product_facts || {}, pg = pack.page_facts || {};
-  const mf = pack.market_facts || {}, screen = pack.decision_screen || {};
-  const record = {
-    asin: card.asin, fetched_at: pack.fetched_at || card.updated_at, category_name: card.category || '',
-    price_min: pf.price == null || pf.price === '' ? null : pf.price,
-    price_max: pf.price == null || pf.price === '' ? null : pf.price,
-    amazon_url: card.amazon_url || '', keepa_url: (card.urls || []).filter(function(u){ return String(u).indexOf('keepa.com') >= 0; })[0] || '',
-    title: card.title || pf.title || '', brand: pf.brand || '', status: 'ATLAS候補',
-    monthly_sold: pf.monthly_sold === '' ? null : pf.monthly_sold,
-    offer_count: mf.total_offer_count == null ? null : mf.total_offer_count,
-    fba_count: mf.fba_offer_count == null ? null : mf.fba_offer_count,
-    image_count: pg.image_count == null || pg.image_count === '' ? null : pg.image_count,
-    has_aplus: pg.has_aplus == null ? null : pg.has_aplus,
-    source_pipeline: screen.pipeline, rule_version: screen.rule_version || '', screen_result: screen.result || ''
-  };
-  let targetRow = -1;
-  let existingRow = null;
-  if (sheet.getLastRow() >= 2) {
-    const asinCol = headers.indexOf('asin') + 1;
-    const values = sheet.getRange(2, asinCol, sheet.getLastRow() - 1, 1).getValues();
-    for (let i = 0; i < values.length; i++) {
-      if (String(values[i][0] || '').trim().toUpperCase() === card.asin) {
-        targetRow = i + 2;
-        existingRow = sheet.getRange(targetRow, 1, 1, headers.length).getValues()[0];
-        break;
-      }
-    }
-  }
-  if (existingRow) {
-    const currentStatus = String(existingRow[headers.indexOf('status')] || '').trim();
-    if (currentStatus && currentStatus !== '未確認' && currentStatus !== 'ATLAS候補') record.status = currentStatus;
-  }
-  const row = headers.map(function(h, i) {
-    return Object.prototype.hasOwnProperty.call(record, h) ? record[h] : (existingRow ? existingRow[i] : '');
-  });
-  if (targetRow > 0) sheet.getRange(targetRow, 1, 1, row.length).setValues([row]);
-  else sheet.appendRow(row);
 }
 
 function setAtlasConnection(url, apiKey) {
@@ -2856,6 +2935,7 @@ function setupSkuMaster() {
 // ============================================
 const SHEET_TRANSACTION_HISTORY = 'transaction_history';
 const SHEET_PERIOD_COSTS        = 'period_costs';
+const SHEET_MANUAL_COST_FALLBACK = 'cost_fallback_overrides';
 
 const REQUIRED_HEADERS_TRANSACTION = [
   'id', 'order_id', 'sku', 'asin', 'date',
@@ -2868,6 +2948,91 @@ const REQUIRED_HEADERS_TRANSACTION = [
 const REQUIRED_HEADERS_PERIOD_COSTS = [
   'id', 'period_key', 'cost_type', 'description', 'amount', 'imported_at'
 ];
+
+const REQUIRED_HEADERS_MANUAL_COST_FALLBACK = [
+  'id', 'sku', 'asin', 'unit_cost', 'effective_from', 'status', 'note',
+  'created_at', 'updated_at'
+];
+
+function getManualCostFallbacks_() {
+  const sheet = getSheetByName_(SHEET_MANUAL_COST_FALLBACK, REQUIRED_HEADERS_MANUAL_COST_FALLBACK);
+  const data = sheet.getDataRange().getValues();
+  if (data.length <= 1) return [];
+  const headers = data[0];
+  const idx = name => headers.indexOf(name);
+  return data.slice(1).map(row => ({
+    id: String(row[idx('id')] || '').trim(),
+    sku: String(row[idx('sku')] || '').trim(),
+    asin: String(row[idx('asin')] || '').trim(),
+    unit_cost: toNumberOrNull_(row[idx('unit_cost')]),
+    effective_from: row[idx('effective_from')],
+    status: String(row[idx('status')] || '').trim() || 'active',
+    note: String(row[idx('note')] || '').trim(),
+    created_at: String(row[idx('created_at')] || '').trim(),
+    updated_at: String(row[idx('updated_at')] || '').trim()
+  })).filter(row => row.sku && row.unit_cost !== null && row.unit_cost > 0 && row.status === 'active');
+}
+
+function readManualCostFallbackMap_() {
+  const map = {};
+  getManualCostFallbacks_().forEach(row => {
+    const effectiveDate = parseDate_(row.effective_from);
+    const normalized = Object.assign({}, row, {
+      effective_from: effectiveDate ? Utilities.formatDate(effectiveDate, Session.getScriptTimeZone(), 'yyyy-MM-dd') : '',
+      effective_time: effectiveDate ? effectiveDate.getTime() : Number.NEGATIVE_INFINITY
+    });
+    const current = map[row.sku];
+    if (!current || normalized.effective_time >= current.effective_time) map[row.sku] = normalized;
+  });
+  return map;
+}
+
+function upsertManualCostFallback_(item) {
+  const sku = String(item.sku || '').trim();
+  const asin = String(item.asin || '').trim().toUpperCase();
+  const unitCost = toNumberOrNull_(item.unit_cost);
+  const effectiveFrom = String(item.effective_from || '').trim();
+  const note = String(item.note || '').trim().slice(0, 500);
+  if (!sku) throw new Error('SKUが必要です。');
+  if (!asin) throw new Error('ASINが必要です。');
+  if (unitCost === null || unitCost <= 0) throw new Error('仮の着地原価は0より大きい数値を入力してください。');
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(effectiveFrom) || !parseDate_(effectiveFrom)) {
+    throw new Error('適用開始日をYYYY-MM-DD形式で入力してください。');
+  }
+
+  const lock = LockService.getScriptLock();
+  lock.waitLock(30000);
+  try {
+    const sheet = getSheetByName_(SHEET_MANUAL_COST_FALLBACK, REQUIRED_HEADERS_MANUAL_COST_FALLBACK);
+    const headers = getHeaders_(sheet, REQUIRED_HEADERS_MANUAL_COST_FALLBACK);
+    const missing = REQUIRED_HEADERS_MANUAL_COST_FALLBACK.filter(h => headers.indexOf(h) < 0);
+    if (missing.length) throw new Error('cost_fallback_overrides の列が不足しています: ' + missing.join(', '));
+    const data = sheet.getDataRange().getValues();
+    const idx = name => headers.indexOf(name);
+    let targetRow = -1;
+    for (let i = 1; i < data.length; i++) {
+      if (String(data[i][idx('sku')] || '').trim() === sku && String(data[i][idx('status')] || 'active') === 'active') {
+        targetRow = i + 1;
+        break;
+      }
+    }
+    const now = new Date().toISOString();
+    const existingId = targetRow > 0 ? String(sheet.getRange(targetRow, idx('id') + 1).getValue() || '') : '';
+    const existingCreated = targetRow > 0 ? String(sheet.getRange(targetRow, idx('created_at') + 1).getValue() || '') : '';
+    const value = {
+      id: existingId || Utilities.getUuid(), sku: sku, asin: asin,
+      unit_cost: unitCost, effective_from: effectiveFrom, status: 'active', note: note,
+      created_at: existingCreated || now, updated_at: now
+    };
+    const rowValues = headers.map(h => value[h] !== undefined ? value[h] : '');
+    if (targetRow > 0) sheet.getRange(targetRow, 1, 1, headers.length).setValues([rowValues]);
+    else sheet.appendRow(rowValues);
+    sheet.getRange(targetRow > 0 ? targetRow : sheet.getLastRow(), idx('effective_from') + 1).setNumberFormat('@STRING@');
+    return value;
+  } finally {
+    lock.releaseLock();
+  }
+}
 
 function setupTransactionSheets() {
   const ss = getSpreadsheet_();
@@ -3168,13 +3333,22 @@ function readTransactionRows_() {
   }).filter(tx => tx.sku && tx.period && (tx.type === '注文' || tx.type === '返金'));
 }
 
+function mergeCostSource_(current, next) {
+  const rank = { moving_average: 0, last_receipt_fallback: 1, current_landed_cost: 2, manual_provisional: 3, missing: 4 };
+  if (!current) return next;
+  return (rank[next] || 0) > (rank[current] || 0) ? next : current;
+}
+
 function buildCogsLedgerBySku_(sku, reorderRows, txRows, options) {
   options = options || {};
   const productId = String(options.productId || '').trim();
   const fallbackCost = toNumberOrNull_(options.fallbackCost);
+  const manualFallback = options.manualFallback || null;
   const periodCogs = {};
   const periodUnits = {};
   const costEstimated = {};
+  const periodCostSources = {};
+  const periodManualFallbacks = {};
   const perTxCost = {};
 
   const events = [];
@@ -3200,8 +3374,13 @@ function buildCogsLedgerBySku_(sku, reorderRows, txRows, options) {
 
   let qtyOnHand = 0;
   let invValue = 0;
+  // 数量を使い切った後も、最後に実在した仕入原価を正式な代替原価として使う。
+  // 2026-01-01の期首在庫もRECVイベントなので、この値へ自然に登録される。
+  // 後日、正しい入荷日で仕入履歴が追加されれば、その原価が以後の代替原価になる。
+  let lastReceiptCost = null;
   events.forEach(ev => {
     if (ev.kind === 'RECV') {
+      lastReceiptCost = ev.unit_cost;
       qtyOnHand += ev.qty;
       invValue += ev.qty * ev.unit_cost;
       return;
@@ -3210,18 +3389,40 @@ function buildCogsLedgerBySku_(sku, reorderRows, txRows, options) {
     const avg = qtyOnHand > 0 ? invValue / qtyOnHand : null;
     let unitCost = avg;
     let estimated = false;
+    let costSource = unitCost !== null && isFinite(unitCost) ? 'moving_average' : 'missing';
     if (unitCost === null || !isFinite(unitCost)) {
-      if (fallbackCost !== null && fallbackCost > 0) {
+      if (lastReceiptCost !== null && lastReceiptCost > 0) {
+        unitCost = lastReceiptCost;
+        estimated = true;
+        costSource = 'last_receipt_fallback';
+      } else if (fallbackCost !== null && fallbackCost > 0) {
         unitCost = fallbackCost;
         estimated = true;
+        costSource = 'current_landed_cost';
+      } else if (manualFallback && manualFallback.unit_cost > 0 && ev.time >= manualFallback.effective_time) {
+        unitCost = manualFallback.unit_cost;
+        estimated = true;
+        costSource = 'manual_provisional';
       } else {
         unitCost = null;
+        costSource = 'missing';
       }
     }
 
     const period = ev.period;
     if (!periodCogs[period]) periodCogs[period] = 0;
     if (!periodUnits[period]) periodUnits[period] = 0;
+    periodCostSources[period] = mergeCostSource_(periodCostSources[period], costSource);
+    if (costSource === 'manual_provisional') {
+      if (!periodManualFallbacks[period]) periodManualFallbacks[period] = {};
+      periodManualFallbacks[period][sku] = {
+        sku: sku,
+        asin: manualFallback.asin || '',
+        unit_cost: manualFallback.unit_cost,
+        effective_from: manualFallback.effective_from || '',
+        note: manualFallback.note || ''
+      };
+    }
 
     if (unitCost !== null) {
       const amount = ev.qty * unitCost;
@@ -3236,29 +3437,32 @@ function buildCogsLedgerBySku_(sku, reorderRows, txRows, options) {
         invValue += amount;
         qtyOnHand += ev.qty;
       }
-      perTxCost[ev.tx.id] = { unitCost, amount, estimated };
+      perTxCost[ev.tx.id] = { unitCost, amount, estimated, costSource };
       if (estimated) costEstimated[period] = true;
     } else {
-      perTxCost[ev.tx.id] = { unitCost: null, amount: null, estimated: false };
+      perTxCost[ev.tx.id] = { unitCost: null, amount: null, estimated: false, costSource: 'missing' };
       costEstimated[period] = true;
       if (ev.kind === 'SALE') qtyOnHand -= ev.qty;
       else qtyOnHand += ev.qty;
     }
   });
 
-  return { perTxCost, periodCogs, periodUnits, costEstimated };
+  return { perTxCost, periodCogs, periodUnits, costEstimated, periodCostSources, periodManualFallbacks };
 }
 
 function calculateMovingAverageActuals_() {
   const skuToAsin = buildSkuToAsinMap_();
   const asinMeta = readLifecycleMeta_();
   const reorderRows = readReorderRows_();
+  const manualFallbacks = readManualCostFallbackMap_();
   const txRows = readTransactionRows_().map(tx => {
     if (!tx.asin && skuToAsin[tx.sku]) tx.asin = skuToAsin[tx.sku];
     return tx;
   });
 
   const byPeriodAsin = {};
+  // 日別粗利でも月次と同じ移動平均台帳を使えるよう、明細ごとの原価割当を保持する。
+  const perTxCostById = {};
   const ensure = (period, asin) => {
     const key = period + '__' + asin;
     if (!byPeriodAsin[key]) {
@@ -3281,6 +3485,8 @@ function calculateMovingAverageActuals_() {
         cogs: 0,
         costUnits: 0,
         costEstimated: false,
+        costSource: '',
+        manualFallbacks: {},
         hasCost: false
       };
     }
@@ -3320,28 +3526,174 @@ function calculateMovingAverageActuals_() {
     const meta = asin ? asinMeta[asin] : null;
     const ledger = buildCogsLedgerBySku_(sku, reorderRows, txRows, {
       productId: meta ? meta.productId : '',
-      fallbackCost: meta ? meta.currentLandedCost : null
+      fallbackCost: meta ? meta.currentLandedCost : null,
+      manualFallback: manualFallbacks[sku] || null
+    });
+    Object.keys(ledger.perTxCost || {}).forEach(txId => {
+      perTxCostById[txId] = ledger.perTxCost[txId];
     });
     Object.keys(ledger.periodCogs).forEach(period => {
       if (!asin) return;
       const s = ensure(period, asin);
       const units = ledger.periodUnits[period] || 0;
+      const periodSource = ledger.periodCostSources[period] || 'missing';
+      // 全数返品では原価対象数が0に戻るが、売上と返品の原価差額は残り得る。
+      // 数量が相殺された期間もCOGSを集計し、全イベントに原価があれば原価確認済みとする。
+      s.cogs += ledger.periodCogs[period] || 0;
       if (units !== 0) {
-        s.cogs += ledger.periodCogs[period] || 0;
         s.costUnits += units;
+        s.hasCost = true;
+      } else if (periodSource !== 'missing') {
         s.hasCost = true;
       }
       if (ledger.costEstimated[period]) s.costEstimated = true;
+      s.costSource = mergeCostSource_(s.costSource, periodSource);
+      const usedManual = ledger.periodManualFallbacks[period] || {};
+      Object.keys(usedManual).forEach(key => { s.manualFallbacks[key] = usedManual[key]; });
     });
   });
 
-  return { byPeriodAsin, txRows, reorderRows, asinMeta };
+  return { byPeriodAsin, txRows, reorderRows, asinMeta, skuToAsin, perTxCostById };
+}
+
+function dailyProfitDateKey_(value) {
+  const date = parseDate_(value);
+  if (!date) return '';
+  return Utilities.formatDate(date, Session.getScriptTimeZone() || 'Asia/Tokyo', 'yyyy-MM-dd');
+}
+
+// 月次粗利と同じ移動平均原価台帳から、日別・商品別の粗利貢献を組み立てる。
+function buildDailyProfitDetails_(calc, periodKey) {
+  const daily = {};
+  calc.txRows.filter(tx => tx.period === periodKey).forEach(tx => {
+    const date = dailyProfitDateKey_(tx.date);
+    if (!date) return;
+    const asin = tx.asin || calc.skuToAsin[tx.sku] || '';
+    const productKey = asin || ('sku:' + tx.sku);
+    const meta = calc.asinMeta[asin] || {};
+    if (!daily[date]) daily[date] = { date, net:0, sales_taxin:0, qty:0, return_qty:0, gross_profit:0, missing_cost_count:0, products:{} };
+    const day = daily[date];
+    if (!day.products[productKey]) {
+      day.products[productKey] = {
+        asin:asin,
+        sku:asin ? '' : tx.sku,
+        title:meta.title || asin || tx.sku || '未紐付き商品',
+        subtitle:meta.subtitle || '',
+        emoji:meta.emoji || '📦',
+        qty:0,
+        return_qty:0,
+        sales_taxin:0,
+        net:0,
+        cogs:0,
+        gross_profit:0,
+        cost_complete:true,
+        cost_sources:{}
+      };
+    }
+    const product = day.products[productKey];
+    const qty = Math.abs(Number(tx.qty) || 0);
+    const isReturn = tx.type === '返金';
+    const allocation = calc.perTxCostById[tx.id] || null;
+    const signedCogs = allocation && allocation.amount != null
+      ? (isReturn ? -Number(allocation.amount) : Number(allocation.amount))
+      : null;
+
+    day.net += Number(tx.net) || 0;
+    day.sales_taxin += Number(tx.salesTaxin) || 0;
+    product.net += Number(tx.net) || 0;
+    product.sales_taxin += Number(tx.salesTaxin) || 0;
+    if (isReturn) {
+      day.return_qty += qty;
+      product.return_qty += qty;
+    } else {
+      day.qty += qty;
+      product.qty += qty;
+    }
+
+    if (signedCogs === null) {
+      day.missing_cost_count++;
+      product.cost_complete = false;
+    } else {
+      const contribution = (Number(tx.net) || 0) - signedCogs;
+      day.gross_profit += contribution;
+      product.cogs += signedCogs;
+      product.gross_profit += contribution;
+      const source = String(allocation.costSource || 'moving_average');
+      product.cost_sources[source] = true;
+    }
+  });
+
+  return Object.keys(daily).sort().map(date => {
+    const day = daily[date];
+    const products = Object.keys(day.products).map(key => {
+      const product = day.products[key];
+      return {
+        asin:product.asin,
+        sku:product.sku,
+        title:product.title,
+        subtitle:product.subtitle,
+        emoji:product.emoji,
+        qty:Math.round(product.qty),
+        return_qty:Math.round(product.return_qty),
+        sales_taxin:Math.round(product.sales_taxin),
+        net:Math.round(product.net),
+        cogs:Math.round(product.cogs),
+        gross_profit:product.cost_complete ? Math.round(product.gross_profit) : null,
+        cost_complete:product.cost_complete,
+        cost_sources:Object.keys(product.cost_sources)
+      };
+    }).sort((a, b) => (b.gross_profit == null ? -Infinity : b.gross_profit) - (a.gross_profit == null ? -Infinity : a.gross_profit));
+    const roundedDayGross = Math.round(day.gross_profit);
+    if (!day.missing_cost_count && products.length) {
+      const productTotal = products.reduce((sum, product) => sum + (Number(product.gross_profit) || 0), 0);
+      const productAdjustment = roundedDayGross - productTotal;
+      if (productAdjustment) {
+        const targetProduct = products.reduce((best, product) =>
+          Math.abs(Number(product.gross_profit) || 0) > Math.abs(Number(best.gross_profit) || 0) ? product : best
+        , products[0]);
+        targetProduct.gross_profit += productAdjustment;
+      }
+    }
+    return {
+      date:day.date,
+      net:Math.round(day.net),
+      sales_taxin:Math.round(day.sales_taxin),
+      qty:Math.round(day.qty),
+      return_qty:Math.round(day.return_qty),
+      gross_profit:day.missing_cost_count ? null : roundedDayGross,
+      known_gross_profit:roundedDayGross,
+      cost_complete:day.missing_cost_count === 0,
+      missing_cost_count:day.missing_cost_count,
+      products:products
+    };
+  });
+}
+
+function reconcileDailyGrossProfit_(days, monthlyGrossProfit) {
+  if (!days.length || days.some(day => !day.cost_complete)) return days;
+  const dailyTotal = days.reduce((sum, day) => sum + (Number(day.gross_profit) || 0), 0);
+  const adjustment = Math.round(Number(monthlyGrossProfit) || 0) - dailyTotal;
+  if (!adjustment) return days;
+  const targetDay = days[days.length - 1];
+  targetDay.gross_profit += adjustment;
+  targetDay.known_gross_profit += adjustment;
+  if (targetDay.products && targetDay.products.length) {
+    const targetProduct = targetDay.products.reduce((best, product) =>
+      Math.abs(Number(product.gross_profit) || 0) > Math.abs(Number(best.gross_profit) || 0) ? product : best
+    , targetDay.products[0]);
+    if (targetProduct.gross_profit != null) targetProduct.gross_profit += adjustment;
+  }
+  return days;
 }
 
 function buildSalesActualEntry_(s, importedAt) {
   const costUnits = s.costUnits || 0;
-  const landedCost = s.hasCost && costUnits > 0 ? s.cogs / costUnits : null;
-  const grossProfit = landedCost !== null ? s.net - s.cogs : null;
+  const netUnits = (Number(s.qty) || 0) - (Number(s.returnQty) || 0);
+  const fullyReturned = Math.abs(netUnits) < 0.000001;
+  const landedCost = s.hasCost && costUnits !== 0 ? s.cogs / costUnits : null;
+  // 注文数と返品数が同数なら在庫原価は相殺されるため、原価入力なしでも粗利を確定できる。
+  // 手数料・返金調整などAmazon側に残った差額が、その期間の粗利になる。
+  const grossProfit = landedCost !== null || fullyReturned ? s.net - s.cogs : null;
   return {
     period: s.period,
     qty: Math.round(s.qty),
@@ -3356,6 +3708,8 @@ function buildSalesActualEntry_(s, importedAt) {
     gross_profit: grossProfit !== null ? Math.round(grossProfit) : null,
     gross_profit_per_unit: grossProfit !== null && costUnits > 0 ? Math.round(grossProfit / costUnits) : null,
     cost_estimated: !!s.costEstimated,
+    cost_source: s.costSource || (landedCost === null ? 'missing' : 'moving_average'),
+    manual_fallbacks: Object.values(s.manualFallbacks || {}),
     return_qty: Math.round(s.returnQty),
     return_amount: Math.round(s.returnAmount),
     imported_at: importedAt || new Date().toISOString()
@@ -3383,6 +3737,8 @@ function getPeriodSummaryMovingAverage_(periodKey) {
         gross_profit: entry.gross_profit,
         gross_profit_per_unit: entry.gross_profit_per_unit,
         cost_estimated: entry.cost_estimated,
+        cost_source: entry.cost_source,
+        manual_fallbacks: entry.manual_fallbacks,
         return_qty: entry.return_qty,
         return_amount: entry.return_amount
       };
@@ -3419,11 +3775,19 @@ function getPeriodSummaryMovingAverage_(periodKey) {
   const costSetCount = products.filter(p => p.gross_profit !== null && p.gross_profit !== undefined).length;
   const uncostProducts = products.filter(p => p.gross_profit === null || p.gross_profit === undefined);
   const uncostNet = uncostProducts.reduce((sum, p) => sum + (p.net || 0), 0);
+  const provisionalProducts = products.filter(p => p.cost_source === 'manual_provisional');
+  const provisionalNet = provisionalProducts.reduce((sum, p) => sum + (p.net || 0), 0);
+  const costSourceCounts = products.reduce((counts, p) => {
+    const source = p.gross_profit === null || p.gross_profit === undefined ? 'missing' : (p.cost_source || 'moving_average');
+    counts[source] = (counts[source] || 0) + 1;
+    return counts;
+  }, {});
   const totalGrossProfit = products
     .filter(p => p.gross_profit !== null && p.gross_profit !== undefined)
     .reduce((sum, p) => sum + p.gross_profit, 0);
   const totalFixedCosts = periodCosts.reduce((sum, c) => sum + c.amount, 0);
   const operatingProfit = totalGrossProfit + totalFixedCosts;
+  const dailySales = reconcileDailyGrossProfit_(buildDailyProfitDetails_(calc, periodKey), totalGrossProfit);
 
   return {
     periodKey,
@@ -3439,11 +3803,14 @@ function getPeriodSummaryMovingAverage_(periodKey) {
       returnRate: totalQty > 0 ? Math.round(totalReturnQty / totalQty * 1000) / 10 : 0,
       costSetCount,
       uncostCount: uncostProducts.length,
-      uncostNet: Math.round(uncostNet)
+      uncostNet: Math.round(uncostNet),
+      provisionalCount: provisionalProducts.length,
+      provisionalNet: Math.round(provisionalNet),
+      costSourceCounts: costSourceCounts
     },
     products,
     periodCosts,
-    dailySales: getDailySales_(periodKey)
+    dailySales
   };
 }
 
@@ -3753,6 +4120,8 @@ function diagnoseMovingAverageCostCoverage(periodKey) {
         gross_profit: entry.gross_profit,
         gross_profit_per_unit: entry.gross_profit_per_unit,
         cost_estimated: entry.cost_estimated,
+        cost_source: entry.cost_source,
+        manual_fallbacks: entry.manual_fallbacks,
         status
       };
     })
@@ -3877,6 +4246,8 @@ function diagnoseMissingCostSources(periodKey) {
       uncovered_qty: problem.uncovered_qty,
       net: problem.net,
       current_landed_cost: meta.currentLandedCost,
+      cost_source: problem.cost_source || '',
+      manual_fallbacks: problem.manual_fallbacks || [],
       product_id: meta.productId || '',
       cause,
       skus: skuRows
