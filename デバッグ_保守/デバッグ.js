@@ -264,6 +264,179 @@ function debugAsin() {
   writeDebugLog_(ss, results);
 }
 
+// ============================================
+// product_lifecycle 旧重複レコード統合
+// 1) auditLegacyLifecycleDuplicates() で候補確認（読み取り専用）
+// 2) dryRunLegacyLifecycleMerge(researchId, sellingId) で差分確認
+// 3) applyLegacyLifecycleMerge(researchId, sellingId, 'MERGE') で適用
+// ============================================
+
+const LEGACY_MERGE_ARCHIVE_SHEET = 'product_lifecycle_merge_archive';
+
+function legacyMergeNormalizeTitle_(value) {
+  return String(value || '').toLowerCase()
+    .replace(/haksai/g, '').replace(/[\s　【】()（）・,，.。\/\\\-ー]/g, '');
+}
+
+function legacyMergeTitleScore_(a, b) {
+  a = legacyMergeNormalizeTitle_(a); b = legacyMergeNormalizeTitle_(b);
+  if (!a || !b) return 0;
+  if (a.indexOf(b) >= 0 || b.indexOf(a) >= 0) return 1;
+  const grams = function(s) { const out = []; for (let i = 0; i < s.length - 1; i++) out.push(s.slice(i, i + 2)); return out; };
+  const aa = grams(a), bb = grams(b), counts = {};
+  aa.forEach(function(x) { counts[x] = (counts[x] || 0) + 1; });
+  let hit = 0; bb.forEach(function(x) { if (counts[x]) { hit++; counts[x]--; } });
+  return aa.length + bb.length ? (2 * hit) / (aa.length + bb.length) : 0;
+}
+
+function legacyMergeReadCards_() {
+  ensureHeaders_(SHEET_PRODUCT_LIFECYCLE, REQUIRED_HEADERS_LIFECYCLE);
+  const sheet = getSheetByName_(SHEET_PRODUCT_LIFECYCLE, REQUIRED_HEADERS_LIFECYCLE);
+  const data = sheet.getDataRange().getValues(), headers = getHeaders_(sheet, REQUIRED_HEADERS_LIFECYCLE);
+  return { sheet:sheet, headers:headers, data:data, cards:data.slice(1).filter(function(r){return r[0];}).map(function(row, i) {
+    const card = rowToObject_(headers, row, JSON_COLS_LIFECYCLE, OBJECT_JSON_COLS_LIFECYCLE, BOOLEAN_COLS_LIFECYCLE);
+    card.__row_num = i + 2; return card;
+  }) };
+}
+
+function auditLegacyLifecycleDuplicates() {
+  const ctx = legacyMergeReadCards_();
+  const sellingRows = ctx.cards.filter(function(c) { return String(c.source || '') === 'csv_import' && c.is_deleted !== true; });
+  const researchRows = ctx.cards.filter(function(c) {
+    return ['csv_import','inventory_import','merged_duplicate'].indexOf(String(c.source || '')) < 0 && c.is_deleted !== true;
+  });
+  const results = sellingRows.map(function(selling) {
+    const candidates = researchRows.map(function(research) {
+      const titleScore = legacyMergeTitleScore_(selling.title, research.title);
+      const categoryMatch = !!selling.category && String(selling.category) === String(research.category);
+      const asinConflict = !!research.asin && String(research.asin).toUpperCase() !== String(selling.asin).toUpperCase();
+      return { research_id:research.id, title:research.title, source:research.source, row:research.__row_num,
+        title_score:Number(titleScore.toFixed(3)), category_match:categoryMatch, asin:research.asin || '', asin_conflict:asinConflict,
+        score:Number((titleScore * 100 + (categoryMatch ? 15 : 0) - (asinConflict ? 100 : 0)).toFixed(1)) };
+    }).filter(function(x) { return x.title_score >= 0.2 || x.category_match; })
+      .sort(function(a,b){return b.score-a.score;}).slice(0,5);
+    return { selling_id:selling.id, row:selling.__row_num, title:selling.title, asin:selling.asin || '',
+      sales_periods:Array.isArray(selling.sales_actual) ? selling.sales_actual.length : 0, candidates:candidates };
+  });
+  Logger.log('auditLegacyLifecycleDuplicates: ' + JSON.stringify(results));
+  return results;
+}
+
+function legacyMergePlan_(researchId, sellingId) {
+  const ctx = legacyMergeReadCards_();
+  const research = ctx.cards.find(function(c){return String(c.id)===String(researchId);});
+  const selling = ctx.cards.find(function(c){return String(c.id)===String(sellingId);});
+  if (!research) throw new Error('リサーチ行が見つかりません: ' + researchId);
+  if (!selling) throw new Error('販売行が見つかりません: ' + sellingId);
+  if (String(selling.source || '') !== 'csv_import') throw new Error('統合元は source=csv_import に限定しています。');
+  if (research.is_deleted === true || selling.is_deleted === true) throw new Error('削除済み行は統合できません。');
+  const sellingAsin = String(selling.asin || '').trim().toUpperCase();
+  if (!sellingAsin) throw new Error('販売行にASINがありません。');
+  if (research.asin && String(research.asin).toUpperCase() !== sellingAsin) throw new Error('ASINが競合しています。research=' + research.asin + ' selling=' + sellingAsin);
+  const duplicates = ctx.cards.filter(function(c){return c.is_deleted!==true && String(c.asin||'').trim().toUpperCase()===sellingAsin;});
+  if (duplicates.some(function(c){return c.id!==selling.id && c.id!==research.id;})) throw new Error('同じASINの第三の行があります: '+JSON.stringify(duplicates.map(function(c){return c.id;})));
+
+  const transferFields = ['asin','gtin','amazon_url','amazon_published_date','supplier_1688_url','rakumart_linkage_status','barcode_option',
+    'current_landed_cost','fba_stock','fba_inbound','fba_daily_t7','fba_days_remain','fba_alert','fba_synced_at','sales_actual'];
+  const changes = {}, conflicts = [];
+  transferFields.forEach(function(field) {
+    const from = selling[field], to = research[field];
+    const hasFrom = !(from === '' || from === null || from === undefined || (Array.isArray(from) && !from.length));
+    if (!hasFrom) return;
+    if (!(to === '' || to === null || to === undefined || (Array.isArray(to) && !to.length)) && JSON.stringify(to)!==JSON.stringify(from)) conflicts.push({field:field,research:to,selling:from,resolution:'sellingを採用'});
+    changes[field] = from;
+  });
+  const oldOwn = normalizeOwnListingObject_(research.own_listing), now = new Date().toISOString();
+  const periods = (Array.isArray(selling.sales_actual)?selling.sales_actual:[]).map(function(x){return String((x||{}).period||'');}).filter(function(x){return /^\d{4}-\d{2}$/.test(x);}).sort();
+  const connectedAt = oldOwn.connected_at || (periods.length ? periods[0]+'-01T00:00:00+09:00' : now);
+  changes.own_listing = {primary_asin:sellingAsin,parent_asin:oldOwn.parent_asin||'',child_asins:oldOwn.child_asins||[],connected_at:connectedAt,updated_at:now,keepa_status:oldOwn.keepa_status||'not_fetched',latest_snapshot_id:oldOwn.latest_snapshot_id||''};
+  changes.is_launched = true; changes.is_deleted = false; changes.origin_type = 'research'; changes.updated_at = now;
+  return {ctx:ctx,research:research,selling:selling,changes:changes,conflicts:conflicts,asin:sellingAsin};
+}
+
+function dryRunLegacyLifecycleMerge(researchId, sellingId) {
+  const plan = legacyMergePlan_(researchId, sellingId);
+  const result = {dry_run:true,research:{id:plan.research.id,row:plan.research.__row_num,title:plan.research.title,source:plan.research.source},
+    selling:{id:plan.selling.id,row:plan.selling.__row_num,title:plan.selling.title,source:plan.selling.source},asin:plan.asin,
+    transfer_fields:Object.keys(plan.changes),conflicts:plan.conflicts,
+    selling_after:{source:'merged_duplicate',is_deleted:true,is_launched:false,asin:'',merged_into:plan.research.id}};
+  Logger.log('dryRunLegacyLifecycleMerge: ' + JSON.stringify(result)); return result;
+}
+
+function debugDryRunHandbellLifecycleMerge() {
+  return dryRunLegacyLifecycleMerge(
+    '0b9e4cbf-e3c1-443a-b095-7fecc41ae886',
+    'a5f357e8-ef7a-4bc4-b9e2-1bd53a8a701a'
+  );
+}
+
+function debugApplyHandbellLifecycleMerge() {
+  return applyLegacyLifecycleMerge(
+    '0b9e4cbf-e3c1-443a-b095-7fecc41ae886',
+    'a5f357e8-ef7a-4bc4-b9e2-1bd53a8a701a',
+    'MERGE'
+  );
+}
+
+function debugDryRunHeatShrinkLifecycleMerge() {
+  return dryRunLegacyLifecycleMerge(
+    '907e0d26-0693-4336-94e7-cf1b9ab05bef',
+    '076e2846-dc69-4ef8-8789-2f3eb7413cf3'
+  );
+}
+
+function debugApplyHeatShrinkLifecycleMerge() {
+  return applyLegacyLifecycleMerge(
+    '907e0d26-0693-4336-94e7-cf1b9ab05bef',
+    '076e2846-dc69-4ef8-8789-2f3eb7413cf3',
+    'MERGE'
+  );
+}
+
+function legacyMergeArchiveRow_(ctx, selling, researchId) {
+  const ss = getSpreadsheet_(); let sheet = ss.getSheetByName(LEGACY_MERGE_ARCHIVE_SHEET);
+  const archiveHeaders = ['archived_at','merged_into_id'].concat(ctx.headers);
+  if (!sheet) {
+    sheet=ss.insertSheet(LEGACY_MERGE_ARCHIVE_SHEET);
+    if(sheet.getMaxColumns()<archiveHeaders.length)sheet.insertColumnsAfter(sheet.getMaxColumns(),archiveHeaders.length-sheet.getMaxColumns());
+    sheet.getRange(1,1,1,archiveHeaders.length).setValues([archiveHeaders]); sheet.setFrozenRows(1);
+  }
+  const current = sheet.getRange(1,1,1,Math.max(1,sheet.getLastColumn())).getValues()[0].filter(String);
+  if (JSON.stringify(current)!==JSON.stringify(archiveHeaders)) throw new Error(LEGACY_MERGE_ARCHIVE_SHEET+' のヘッダーが想定と異なります。');
+  const original = ctx.data[selling.__row_num - 1];
+  sheet.appendRow([new Date().toISOString(),researchId].concat(original));
+}
+
+function applyLegacyLifecycleMerge(researchId, sellingId, confirmation) {
+  if (confirmation !== 'MERGE') throw new Error("第3引数に 'MERGE' を指定してください。先にdryRunを確認してください。");
+  const lock=LockService.getScriptLock(); lock.waitLock(30000);
+  try {
+    const plan=legacyMergePlan_(researchId,sellingId), ctx=plan.ctx;
+    legacyMergeArchiveRow_(ctx,plan.selling,plan.research.id);
+    Object.keys(plan.changes).forEach(function(k){plan.research[k]=plan.changes[k];});
+    const mergedNote='[統合元 '+plan.selling.id+' / '+plan.asin+']';
+    plan.research.summary=String(plan.research.summary||'')+(String(plan.research.summary||'').indexOf(mergedNote)>=0?'':'\n'+mergedNote);
+
+    plan.selling.source='merged_duplicate'; plan.selling.origin_type='import'; plan.selling.is_deleted=true; plan.selling.is_launched=false;
+    plan.selling.asin=''; plan.selling.own_listing={}; plan.selling.updated_at=new Date().toISOString();
+    plan.selling.summary=String(plan.selling.summary||'')+'\n[統合済み → '+plan.research.id+' / 元ASIN '+plan.asin+']';
+
+    const researchRow=buildRowFromHeaders_(ctx.headers,plan.research,JSON_COLS_LIFECYCLE,OBJECT_JSON_COLS_LIFECYCLE,BOOLEAN_COLS_LIFECYCLE);
+    const sellingRow=buildRowFromHeaders_(ctx.headers,plan.selling,JSON_COLS_LIFECYCLE,OBJECT_JSON_COLS_LIFECYCLE,BOOLEAN_COLS_LIFECYCLE);
+    ctx.sheet.getRange(plan.research.__row_num,1,1,researchRow.length).setValues([researchRow]);
+    ctx.sheet.getRange(plan.selling.__row_num,1,1,sellingRow.length).setValues([sellingRow]);
+
+    const reorder=getSpreadsheet_().getSheetByName(SHEET_REORDER_HISTORY);
+    let reorderUpdated=0;
+    if(reorder){const d=reorder.getDataRange().getValues(),h=d[0]||[],idx=h.indexOf('product_id');if(idx>=0){for(let i=1;i<d.length;i++){if(String(d[i][idx])===String(plan.selling.id)){reorder.getRange(i+1,idx+1).setValue(plan.research.id);reorderUpdated++;}}}}
+
+    const project=findPageProjectByCardId_(plan.research.id);
+    if(project){project.own_listing=plan.research.own_listing;if(!project.document_status)project.document_status='candidate_selected';updatePageProjectInSheet(project);}
+    const result={status:'merged',research_id:plan.research.id,archived_selling_id:plan.selling.id,asin:plan.asin,reorder_rows_updated:reorderUpdated};
+    Logger.log('applyLegacyLifecycleMerge: '+JSON.stringify(result)); return result;
+  } finally { lock.releaseLock(); }
+}
+
 // デバッグ結果をシートに書き出す（ログが流れても後から確認できるように）
 function writeDebugLog_(ss, results) {
   let logSheet = ss.getSheetByName('_debug_log');
