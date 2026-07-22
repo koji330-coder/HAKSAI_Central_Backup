@@ -1,0 +1,18 @@
+const assert=require('assert');const fs=require('fs');
+const box=fs.readFileSync('折りコン/折りコン管理.js','utf8');
+const core=fs.readFileSync('コア/コード.js','utf8');
+const ui=fs.readFileSync('_github_HAKSAI-Central/index.html','utf8');
+assert(box.includes('function getHomeInventoryOverview_()'));
+assert(box.includes('function setHomeInventoryQuantity_(data)'));
+assert(box.includes('function bulkSetHomeInventory_(rows)'));
+assert(core.includes("action === 'getHomeInventoryOverview'"));
+assert(core.includes("action === 'setHomeInventoryQuantity'"));
+assert(core.includes("action === 'bulkSetHomeInventory'"));
+assert(ui.includes('商品別自宅在庫'));
+assert(ui.includes('初期在庫をまとめて登録'));
+assert(ui.includes('home-inventory-search'));
+assert(ui.includes('changeHomeInventoryQty_'));
+assert(ui.includes('grid-template-columns:minmax(0,1fr) auto'));
+assert(ui.includes('width:38px;min-width:38px'));
+assert(ui.includes('保管場所・箱から見る'));
+console.log('home_inventory_workflow_test: ok');

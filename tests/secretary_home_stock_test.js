@@ -1,0 +1,13 @@
+const assert=require('assert');const fs=require('fs');
+const sec=fs.readFileSync('分析/秘書.js','utf8');
+const ui=fs.readFileSync('_github_HAKSAI-Central/index.html','utf8');
+assert(sec.includes('function secHomeStockMap_()'));
+assert(sec.includes('function secDaysUntilHomeReplenishment_'));
+assert(sec.includes("type:'home_replenishment'"));
+assert(sec.includes('overseas_order_required:false'));
+assert(sec.includes("next_action:'週末のFBA納品へ追加する'"));
+assert(sec.includes('if (days <= localLeadDays)'));
+assert(sec.includes('return;\n      }\n      events.push({ type:\'stockout_risk\''), 'home stock must suppress overseas stockout event');
+assert(ui.includes("card.route === 'home-inventory'"));
+assert(ui.includes("switchTab('boxes')"));
+console.log('secretary_home_stock_test: ok');

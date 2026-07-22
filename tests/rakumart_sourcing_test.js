@@ -1,0 +1,23 @@
+const assert = require('assert');
+const fs = require('fs');
+const backend = fs.readFileSync('rakumart_sourcing.gs','utf8');
+const core = fs.readFileSync('コア/コード.js','utf8');
+const ui = fs.readFileSync('_github_HAKSAI-Central/index.html','utf8');
+
+assert(backend.includes('中国語検索キーワードは最低8件'));
+assert(backend.includes('各件に自然な日本語訳を必ず付けてください'));
+assert(backend.includes('String(k.chinese') && backend.includes('String(k.japanese'), 'Chinese/Japanese keyword validation missing');
+assert(backend.includes('confirmed_facts') && backend.includes('inferred_facts') && backend.includes('unknown_fields'));
+assert(backend.includes('claim_guard') && backend.includes('prohibited_claims'));
+assert(backend.includes("?'adopted':"));
+assert(core.includes("action === 'generateRakumartSearchBrief'"));
+assert(core.includes("action === 'addRakumartCandidate'"));
+assert(core.includes("action === 'compareRakumartCandidates'"));
+assert(core.includes("action === 'adoptRakumartCandidate'"));
+assert(core.includes('商品仕様として使用できるのは listing_handoff.confirmed_facts'));
+assert(core.includes('isAtlasProject && !handoff.ready'), 'existing ATLAS projects must also be gated');
+assert(ui.includes('検索キーワード（中国語＋日本語）'));
+assert(ui.includes('勝ち筋とラクマート検索条件を作る'));
+assert(ui.includes('候補を保存してGemini解析'));
+assert(ui.includes('仕入候補・SKU決定状況と訴求ガード'));
+console.log('rakumart_sourcing_test: ok');
