@@ -1,0 +1,9 @@
+**/tests/**
+**/.git/**
+**/.agents/**
+**/.codex/**
+**/.codex-backup/**
+HAKSAI Central.xlsx
+原価_在庫/landed-cost-webapp/**
+原価_在庫/着地原価パイプライン統合方針メモ.md
+設計書/**

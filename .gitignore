@@ -1,0 +1,12 @@
+# GitHub Pages本体は別リポジトリ(koji330-coder/HAKSAI-Central)。ここでは追跡しない。
+_github_HAKSAI-Central/
+
+# 別ツール(Codex)が作成した日付付きバックアップ。削除はせず、追跡対象からのみ外す。
+.codex-backup/
+
+# 手動バックアップの退避先(2026-07-22整理時に作成)。
+_archive_backups/
+
+# 手動で作られがちなバックアップファイル。今後増やさない。
+*.backup_*
+*.bak_*
