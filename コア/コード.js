@@ -1792,6 +1792,20 @@ const RCC_SOURCE_LABELS_ = {
   atlas: 'ATLAS', asin_research: 'ASIN起点リサーチ', secretary: 'マイカ(競合分析)',
   legacy: '旧カード', seed: '種(アイデア)'
 };
+const RCC_DECISION_RESULT_LABELS_ = {
+  INSUFFICIENT_DATA: 'データ不足(判定保留)',
+  GO: 'GO判定',
+  NO_GO: 'NO GO判定',
+  WATCH: '継続ウォッチ'
+};
+const RCC_REASON_LABELS_ = {
+  DEMAND_UNKNOWN: '需要が不明'
+};
+const RCC_MISSING_FIELD_LABELS_ = {
+  rakumart_url: '仕入先URL', cny_unit_cost: '仕入原価(元)', landed_cost_est: '着地原価見込み',
+  competitors_3plus: '競合3件以上の比較', low_rating_reviews: '低評価レビューの確認',
+  regulatory_check: '規制チェック', monthly_sold: '月間販売数'
+};
 
 function rccRows_(sheetName) {
   const ss = getSpreadsheet_();
@@ -1824,6 +1838,49 @@ function rccDate_(value) {
   if (value instanceof Date && !isNaN(value.getTime())) return value;
   const date = new Date(value);
   return isNaN(date.getTime()) ? null : date;
+}
+
+function rccLabelList_(codes, dict) {
+  if (!Array.isArray(codes)) return [];
+  return codes.map(function(code) {
+    const key = String(code || '').trim();
+    return dict[key] || key;
+  }).filter(Boolean);
+}
+
+function rccCategoryPath_(tree) {
+  if (!Array.isArray(tree)) return '';
+  return tree.map(function(node) { return String((node && node.name) || '').trim(); }).filter(Boolean).join(' > ');
+}
+
+function rccLastValidPct_(arr) {
+  if (!Array.isArray(arr)) return null;
+  for (let i = arr.length - 1; i >= 0; i--) {
+    const value = Number(arr[i]);
+    if (isFinite(value) && value >= 0) return value;
+  }
+  return null;
+}
+
+function rccKeepaFacts_(pack) {
+  if (!pack || !Object.keys(pack).length) return null;
+  const pf = pack.product_facts || {};
+  const mf = pack.market_facts || {};
+  const screen = pack.decision_screen || {};
+  const resultCode = String(screen.result || '').trim();
+  return {
+    brand: String(pf.brand || '').trim(),
+    category_path: rccCategoryPath_(pf.category_tree),
+    variation_count: Number(pf.variation_count || 0),
+    sales_rank_drops_30: Number(pf.sales_rank_drops_30 || 0),
+    sales_rank_drops_90: Number(pf.sales_rank_drops_90 || 0),
+    offer_count: Number(mf.total_offer_count || 0),
+    buybox_is_amazon: !!mf.buy_box_is_amazon,
+    out_of_stock_pct_90: rccLastValidPct_(mf.out_of_stock_pct_90),
+    decision_result_label: resultCode ? (RCC_DECISION_RESULT_LABELS_[resultCode] || resultCode) : '',
+    reason_labels: rccLabelList_(screen.reason_codes, RCC_REASON_LABELS_),
+    missing_field_labels: rccLabelList_(screen.missing_fields, RCC_MISSING_FIELD_LABELS_)
+  };
 }
 
 function rccIsResearchCard_(card) {
@@ -1936,6 +1993,12 @@ function getResearchCommandCenterData_() {
     const monthlySales = Number(pf.monthly_sold == null ? card.monthly_sales : pf.monthly_sold) || 0;
     const reviews = Number(pf.review_count == null ? card.reviews : pf.review_count) || 0;
     const title = String(card.title || pf.title || '').trim() || (asin || 'タイトル未設定');
+    const audit = rccJson_(card.audit, {});
+    const maicaComment = String(audit.commentary || '').trim();
+    const description = String(pg.description || '').trim();
+    const features = Array.isArray(pg.features) ? pg.features.map(function(f) { return String(f || '').trim(); }).filter(Boolean) : [];
+    const imageUrls = Array.isArray(pg.image_urls) ? pg.image_urls.map(function(u) { return String(u || '').trim(); }).filter(Boolean) : [];
+    const keepaFacts = rccKeepaFacts_(pack);
 
     const presence = {
       asin: !!asin,
@@ -1989,6 +2052,11 @@ function getResearchCommandCenterData_() {
       has_supplier: hasSupplier,
       is_legacy: sourceGroup === 'legacy',
       next_action: rccNextAction_(stage, missingCore, hasSupplier, linkedPage),
+      maica_comment: maicaComment,
+      description: description,
+      features: features,
+      image_urls: imageUrls,
+      keepa_facts: keepaFacts,
       page_project: linkedPage ? {
         id: String(linkedPage.id || ''),
         status: String(linkedPage.status || ''),
