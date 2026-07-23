@@ -332,6 +332,7 @@ function doGet(e) {
       return jsonResponse({ status: 'ok', skuMaster, fixedCosts });
     }
     if (action === 'getCards') return jsonResponse({ status: 'ok', cards: getAllCards_ProductLifecycle() });
+    if (action === 'getResearchCommandCenter') return jsonResponse({ status: 'ok', data: getResearchCommandCenterData_() });
     if (action === 'getResearchLessons') return jsonResponse({ status: 'ok', data: getResearchLessons_() });
     if (action === 'getCardDetail') {
       const id = e.parameter.id || '';
@@ -1766,6 +1767,253 @@ function validateStatusTransition(newStatus, cardData) {
     default:
       break;
   }
+}
+
+// ============================================
+// リサーチ司令室(React版central-frontend専用、読み取り専用)
+// product_lifecycle + page_projects を読み替えて集計するだけで、
+// シート・トリガー・プロパティは一切変更しない。
+// ============================================
+const RCC_RESEARCH_SOURCES_ = [
+  'ATLAS_SOURCING_DECISION',
+  'ATLAS_ASIN_RESEARCH',
+  'Seller ATLAS',
+  'SECRETARY_COMPETITOR_ANALYSIS'
+];
+const RCC_FIELDS_ = [
+  'asin', 'title', 'category', 'price', 'monthly_sales', 'reviews', 'human_memo',
+  'keepa_data', 'product_facts', 'page_facts', 'decision_screen', 'images', 'supplier', 'page_project'
+];
+const RCC_STAGE_LABELS_ = {
+  research_pool: 'リサーチプール', screened: '選別済み', supplier_materials: '仕入・素材収集',
+  page_production: 'ページ制作中', launched: '販売中', archived: '終了'
+};
+const RCC_SOURCE_LABELS_ = {
+  atlas: 'ATLAS', asin_research: 'ASIN起点リサーチ', secretary: 'マイカ(競合分析)',
+  legacy: '旧カード', seed: '種(アイデア)'
+};
+
+function rccRows_(sheetName) {
+  const ss = getSpreadsheet_();
+  const sheet = ss.getSheetByName(sheetName);
+  if (!sheet || sheet.getLastRow() < 1) return { exists: false, rows: [] };
+  const values = sheet.getDataRange().getValues();
+  const headers = values[0].map(function(value) { return String(value || '').trim(); });
+  const rows = values.slice(1).filter(function(row) {
+    return row.some(function(value) { return value !== '' && value !== null; });
+  }).map(function(row) {
+    const item = {};
+    headers.forEach(function(header, index) { if (header) item[header] = row[index]; });
+    return item;
+  });
+  return { exists: true, rows: rows };
+}
+
+function rccJson_(value, fallback) {
+  if (value && typeof value === 'object') return value;
+  try { return JSON.parse(String(value || '')); } catch (e) { return fallback; }
+}
+
+function rccBool_(value) {
+  if (value === true || value === 1) return true;
+  return ['true', '1', 'yes'].indexOf(String(value || '').trim().toLowerCase()) >= 0;
+}
+
+function rccDate_(value) {
+  if (!value) return null;
+  if (value instanceof Date && !isNaN(value.getTime())) return value;
+  const date = new Date(value);
+  return isNaN(date.getTime()) ? null : date;
+}
+
+function rccIsResearchCard_(card) {
+  const origin = String(card.origin_type || '').trim();
+  const source = String(card.source || '').trim();
+  const pack = rccJson_(card.keepa_data, {});
+  const screen = pack.decision_screen || {};
+  return origin === 'research' || RCC_RESEARCH_SOURCES_.indexOf(source) >= 0 || screen.pipeline === 'sourcing-decision';
+}
+
+function rccSourceGroup_(card, asin) {
+  const source = String(card.source || '').trim();
+  if (source === 'ATLAS_SOURCING_DECISION' || source === 'Seller ATLAS') return 'atlas';
+  if (source === 'ATLAS_ASIN_RESEARCH') return 'asin_research';
+  if (source === 'SECRETARY_COMPETITOR_ANALYSIS') return 'secretary';
+  if (!asin) return 'seed';
+  return 'legacy';
+}
+
+function rccHasSupplier_(card, project) {
+  if (String(card.supplier_1688_url || '').trim()) return true;
+  if (!project) return false;
+  const brief = rccJson_(project.sourcing_brief, {});
+  const comparison = rccJson_(project.sourcing_comparison, {});
+  const extra = rccJson_(project.extra_texts, {});
+  return !!String(extra.supplier_url || '').trim() || Object.keys(brief).length > 0 || Object.keys(comparison).length > 0;
+}
+
+function rccHasImages_(card, project) {
+  const cardImages = rccJson_(card.image_drive_ids, []);
+  if ((Array.isArray(cardImages) && cardImages.length) || String(card.image_drive_id || '').trim()) return true;
+  if (!project) return false;
+  const projectImages = rccJson_(project.image_drive_ids, []);
+  const extraImages = rccJson_(project.extra_image_ids, []);
+  return (Array.isArray(projectImages) && projectImages.length > 0) || (Array.isArray(extraImages) && extraImages.length > 0);
+}
+
+function rccHasOwnAsin_(value) {
+  const own = rccJson_(value, {});
+  if (Array.isArray(own)) return own.some(function(item) { return !!String(item && item.asin || '').trim(); });
+  return !!String(own.asin || '').trim();
+}
+
+function rccStage_(archived, launched, linkedPage, hasSupplier, screen) {
+  if (archived) return 'archived';
+  if (launched) return 'launched';
+  if (linkedPage) return 'page_production';
+  if (hasSupplier) return 'supplier_materials';
+  if (screen && Object.keys(screen).length) return 'screened';
+  return 'research_pool';
+}
+
+function rccStatus_(archived, launched, rawStatus) {
+  if (archived) return 'closed';
+  if (launched) return 'launched';
+  const status = String(rawStatus || '').trim().toLowerCase();
+  if (/hold|保留|stop|pause/.test(status)) return 'hold';
+  if (/go|promising|有望|favorite/.test(status)) return 'promising';
+  return 'reviewing';
+}
+
+function rccNextAction_(stage, missingCore, hasSupplier, linkedPage) {
+  if (missingCore.length) return '商品データ(ASIN・価格・月販・商品データ)を補完する';
+  if (stage === 'research_pool') return '判断材料を評価する';
+  if (stage === 'screened') return '仕入先を探す';
+  if (stage === 'supplier_materials' && !linkedPage) return 'ページ案を作成する';
+  if (stage === 'page_production' && !hasSupplier) return '仕入情報を接続する';
+  if (stage === 'page_production') return 'ページ案を完成させる';
+  if (stage === 'launched') return '実績を追う';
+  return '終了済み';
+}
+
+function getResearchCommandCenterData_() {
+  const now = new Date();
+  const lifecycle = rccRows_(SHEET_PRODUCT_LIFECYCLE);
+  const pageProjects = rccRows_(SHEET_PAGE_PROJECTS);
+  const researchCards = lifecycle.rows.filter(rccIsResearchCard_);
+
+  const pageByCard = {};
+  pageProjects.rows.forEach(function(project) {
+    const cardId = String(project.source_card_id || '').trim();
+    if (!cardId) return;
+    if (!pageByCard[cardId] || (rccDate_(project.updated_at) || 0) > (rccDate_(pageByCard[cardId].updated_at) || 0)) {
+      pageByCard[cardId] = project;
+    }
+  });
+
+  const sourceCounts = {}, stageCounts = {};
+  let active = 0, readyForPage = 0, linkedPages = 0, needsSupplier = 0, updated30d = 0;
+
+  const cards = researchCards.map(function(card) {
+    const id = String(card.id || '').trim();
+    const asin = String(card.asin || '').trim().toUpperCase();
+    const pack = rccJson_(card.keepa_data, {});
+    const pf = pack.product_facts || {};
+    const pg = pack.page_facts || {};
+    const screen = pack.decision_screen || {};
+    const linkedPage = pageByCard[id] || null;
+    const isArchived = rccBool_(card.is_deleted);
+    const isLaunched = rccBool_(card.is_launched) || rccHasOwnAsin_(card.own_listing);
+    const hasSupplier = rccHasSupplier_(card, linkedPage);
+    const hasImages = rccHasImages_(card, linkedPage);
+    const updatedAt = rccDate_(card.updated_at);
+    const daysAgo = updatedAt ? Math.max(0, Math.floor((now.getTime() - updatedAt.getTime()) / 86400000)) : null;
+    const decision = String(screen.result || screen.decision || screen.final_decision || '').trim();
+    const stage = rccStage_(isArchived, isLaunched, linkedPage, hasSupplier, screen);
+    const sourceGroup = rccSourceGroup_(card, asin);
+
+    const price = Number(pf.price == null ? card.price : pf.price) || 0;
+    const monthlySales = Number(pf.monthly_sold == null ? card.monthly_sales : pf.monthly_sold) || 0;
+    const reviews = Number(pf.review_count == null ? card.reviews : pf.review_count) || 0;
+    const title = String(card.title || pf.title || '').trim() || (asin || 'タイトル未設定');
+
+    const presence = {
+      asin: !!asin,
+      title: !!String(card.title || pf.title || '').trim(),
+      category: !!String(card.category || '').trim(),
+      price: price > 0,
+      monthly_sales: monthlySales > 0,
+      reviews: reviews > 0 || !!pf.review_count,
+      human_memo: !!String(card.summary || card.weakness || '').trim(),
+      keepa_data: Object.keys(pack).length > 0,
+      product_facts: Object.keys(pf).length > 0,
+      page_facts: Object.keys(pg).length > 0,
+      decision_screen: Object.keys(screen).length > 0,
+      images: hasImages,
+      supplier: hasSupplier,
+      page_project: !!linkedPage
+    };
+    const presentCount = RCC_FIELDS_.filter(function(field) { return presence[field]; }).length;
+    const missingCore = ['asin', 'price', 'monthly_sales', 'product_facts'].filter(function(key) { return !presence[key]; });
+
+    sourceCounts[sourceGroup] = (sourceCounts[sourceGroup] || 0) + 1;
+    stageCounts[stage] = (stageCounts[stage] || 0) + 1;
+    if (stage !== 'launched' && stage !== 'archived') active++;
+    if (linkedPage) linkedPages++;
+    if (daysAgo !== null && daysAgo <= 30) updated30d++;
+    if (missingCore.length === 0 && !linkedPage && stage !== 'archived') readyForPage++;
+    if (stage === 'page_production' && !hasSupplier) needsSupplier++;
+
+    return {
+      id: id,
+      asin: asin,
+      title: title,
+      category: String(card.category || '').trim(),
+      source: String(card.source || '').trim(),
+      source_group: sourceGroup,
+      source_label: RCC_SOURCE_LABELS_[sourceGroup] || sourceGroup,
+      status_raw: String(card.status || '').trim(),
+      status: rccStatus_(isArchived, isLaunched, card.status),
+      stage: stage,
+      stage_label: RCC_STAGE_LABELS_[stage] || stage,
+      decision: decision,
+      price: price,
+      monthly_sales: monthlySales,
+      reviews: reviews,
+      memo: String(card.summary || card.weakness || '').trim(),
+      updated_at: updatedAt ? updatedAt.toISOString() : '',
+      updated_days_ago: daysAgo,
+      completeness_score: Math.round(presentCount / RCC_FIELDS_.length * 100),
+      missing_core: missingCore,
+      has_images: hasImages,
+      has_supplier: hasSupplier,
+      is_legacy: sourceGroup === 'legacy',
+      next_action: rccNextAction_(stage, missingCore, hasSupplier, linkedPage),
+      page_project: linkedPage ? {
+        id: String(linkedPage.id || ''),
+        status: String(linkedPage.status || ''),
+        sourcing_state: String(linkedPage.sourcing_state || ''),
+        updated_at: linkedPage.updated_at ? String(linkedPage.updated_at) : ''
+      } : null
+    };
+  }).sort(function(a, b) { return String(b.updated_at || '').localeCompare(String(a.updated_at || '')); });
+
+  return {
+    generated_at: now.toISOString(),
+    read_only: true,
+    terminology: { external_tool: 'ATLAS', canonical_card_sheet: 'product_lifecycle', canonical_page_sheet: 'page_projects' },
+    summary: {
+      total: researchCards.length,
+      active: active,
+      ready_for_page: readyForPage,
+      linked_page_projects: linkedPages,
+      needs_supplier: needsSupplier,
+      updated_within_30d: updated30d
+    },
+    source_counts: sourceCounts,
+    stage_counts: stageCounts,
+    cards: cards
+  };
 }
 
 // ============================================
