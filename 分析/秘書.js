@@ -1,6 +1,7 @@
 /** HAKSAI Central 秘書 — ルール検出、Gemini整形、カード・設定・記憶管理 */
 const SEC_MAX_CARDS_DEFAULT = 20;
 const SEC_LEAD_TIME_DEFAULT = 45;
+const SEC_LEGACY_RESEARCH_GO_LIMIT = 3;
 const SEC_SETTINGS_SHEET = 'secretary_settings';
 const SEC_CARDS_SHEET = 'action_cards';
 const SEC_RUN_LOG_SHEET = 'sec_run_log';
@@ -443,6 +444,19 @@ function secAppendResearchEvents_(events, lifecycleRows) {
       facts:{ source:source, monthly_sold:secNum_(row.monthly_sales), price:secNum_(row.price), reviews:secNum_(row.reviews), user_memo:userMemo, cost_simulation:roughSim } });
   });
 
+  let legacyAdded = 0;
+  secRows_('keepa_research_candidates').forEach(function(row) {
+    if (legacyAdded >= SEC_LEGACY_RESEARCH_GO_LIMIT) return;
+    if (String(row.status || '').trim().toUpperCase() !== 'GO') return;
+    const asin = String(row.asin || '').trim().toUpperCase();
+    if (!asin || usedAsins[asin] || byAsin[asin]) return;
+    usedAsins[asin] = true; legacyAdded++;
+    events.push({ type:'research_go_legacy', event_key:'research_go:' + asin, asin:asin,
+      name:String(row.title || asin).slice(0,40), priority:'P3', category:'リサーチ',
+      detail:'補欠候補: 旧Keepa一次選別GO（月販' + secNum_(row.monthly_sold) + '）。',
+      next_action:'ATLASで再取得するか、参入判断へ進めるか確認する', route:'sourcing-decision',
+      facts:{ legacy:true, monthly_sold:secNum_(row.monthly_sold), price_min:secNum_(row.price_min), price_max:secNum_(row.price_max), offer_count:secNum_(row.offer_count) } });
+  });
 }
 
 function secIsAtlasLifecycleRow_(row) {
@@ -735,21 +749,11 @@ function secProductActionHistory_() {
   const actions = typeof getAllProductActions_ === 'function' ? getAllProductActions_(false) : [];
   const enriched = actions.map(function(action) {
     const asin = String(action.asin || '').trim().toUpperCase(), product = names[asin] || {};
-    const targetAsins = Array.isArray(action.target_asins) && action.target_asins.length
-      ? action.target_asins.map(function(value) { return String(value || '').trim().toUpperCase(); }).filter(Boolean)
-      : [asin].filter(Boolean);
-    const sharedProducts = targetAsins.map(function(targetAsin) {
-      const target = names[targetAsin] || {};
-      return { asin:targetAsin, title:target.title || targetAsin, subtitle:target.subtitle || '' };
-    });
     const attachments = Array.isArray(action.attachments) ? action.attachments : [];
     const tags = Array.isArray(action.tags) ? action.tags : [];
     return Object.assign({}, action, {
       product_title:product.title || asin,
       product_subtitle:product.subtitle || '',
-      shared_product_count:targetAsins.length,
-      shared_products:sharedProducts,
-      shared_summary:targetAsins.length > 1 ? ('バリエーション共通・' + targetAsins.length + '商品') : '',
       attachment_count:attachments.length,
       from_maika:tags.indexOf('マイカ提案') >= 0
     });

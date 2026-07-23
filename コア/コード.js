@@ -8,6 +8,33 @@ function getApiKey_() {
   return PropertiesService.getScriptProperties().getProperty('API_KEY') || '';
 }
 
+// HAKSAI Central(React版・central-frontend)からの通信専用の共有シークレット認証。
+// Cloudflare Worker(haksai-central-api)経由でのみ付与される。他ツールのactionには影響しない。
+function getCentralSecret_() {
+  return PropertiesService.getScriptProperties().getProperty('CENTRAL_SHARED_SECRET') || '';
+}
+
+function centralAuthOk_(providedSecret) {
+  const expected = getCentralSecret_();
+  return !!expected && String(providedSecret || '') === expected;
+}
+
+const CENTRAL_PROTECTED_GET_ACTIONS_ = new Set([
+  'getAvailablePeriods', 'getPeriodSummary', 'diagnoseMissingCostSources', 'getInventoryAlerts',
+  'getInboundPlan', 'getRecentTransactionsByAsin', 'getImportStatus', 'getReorderManagementData',
+  'getProductCatalog', 'getResearchCommandCenter', 'getProductGrowthData', 'getProductActions',
+  'getListingSnapshot', 'getProductMarketHistory', 'getProductMonthlyData', 'getProductConsultations',
+  'getProductConsultation', 'getMasterData'
+]);
+
+const CENTRAL_PROTECTED_POST_ACTIONS_ = new Set([
+  'upsertManualCostFallback', 'syncInventory', 'syncInboundPlan', 'syncTransactions',
+  'previewAdProductReport', 'syncAdProductReport', 'syncBusinessReport', 'createDomesticOrder',
+  'updateDomesticOrder', 'cancelDomesticOrder', 'receiveDomesticOrder', 'saveProductAction',
+  'archiveProductAction', 'refreshOwnListingSnapshot', 'refreshProductMarketHistory',
+  'consultProductGrowthMaika', 'sendProductConsultationMessage', 'saveProductContextNote'
+]);
+
 const PROPS = PropertiesService.getScriptProperties();
 const GEMINI_API_KEY = PROPS.getProperty('GEMINI_API_KEY');
 const DRIVE_FOLDER_ID = PROPS.getProperty('DRIVE_FOLDER_ID');
@@ -123,6 +150,23 @@ function jsonResponse(obj) {
   return ContentService.createTextOutput(JSON.stringify(obj)).setMimeType(ContentService.MimeType.JSON);
 }
 
+// スクリプトプロパティ DEBUG_MODE='true' の時だけ、Unknown action応答に
+// 実際にディスパッチ対象のaction一覧を含める(本番で内部構造を露出させないため既定オフ)。
+function pgDebugModeOn_() {
+  return PropertiesService.getScriptProperties().getProperty('DEBUG_MODE') === 'true';
+}
+
+function pgListDispatchedActions_(fn) {
+  const src = fn.toString();
+  const seen = {};
+  const out = [];
+  (src.match(/action\s*===\s*'([^']+)'/g) || []).forEach(function(m) {
+    const name = m.match(/'([^']+)'/)[1];
+    if (!seen[name]) { seen[name] = true; out.push(name); }
+  });
+  return out;
+}
+
 function parseBody_(e) {
   if (!e || !e.postData || !e.postData.contents) return {};
   return JSON.parse(e.postData.contents);
@@ -219,6 +263,9 @@ function doGet(e) {
   const body = parseBody_(e);  // ← parseBodyを先に呼ぶ
   try {
     const action = e && e.parameter ? e.parameter.action : '';
+    if (CENTRAL_PROTECTED_GET_ACTIONS_.has(action) && !centralAuthOk_(e && e.parameter && e.parameter.secret)) {
+      return jsonResponse({ status: 'error', message: 'unauthorized' });
+    }
     if (action === 'debugReadSheet') {
       const asin = e.parameter.asin || 'B0FX55ZKRB';
       const ss = SpreadsheetApp.openById(PropertiesService.getScriptProperties().getProperty('SPREADSHEET_ID'));
@@ -285,7 +332,6 @@ function doGet(e) {
       return jsonResponse({ status: 'ok', skuMaster, fixedCosts });
     }
     if (action === 'getCards') return jsonResponse({ status: 'ok', cards: getAllCards_ProductLifecycle() });
-    if (action === 'getResearchCommandCenter') return jsonResponse({ status: 'ok', data: getResearchCommandCenterData_() });
     if (action === 'getResearchLessons') return jsonResponse({ status: 'ok', data: getResearchLessons_() });
     if (action === 'getCardDetail') {
       const id = e.parameter.id || '';
@@ -495,6 +541,10 @@ function doPost(e) {
     try {
     const action = body.action;
 
+    if (CENTRAL_PROTECTED_POST_ACTIONS_.has(action) && !centralAuthOk_(body && body.secret)) {
+      return jsonResponse({ status: 'error', message: 'unauthorized' });
+    }
+
     if (action === 'saveKeepaSchedule') {
       return jsonResponse(saveKeepaSchedule(body.subAction, body.data));
     }
@@ -678,7 +728,7 @@ function doPost(e) {
     }
 
     if (action === 'syncTransactions') {
-      const result = syncTransactions(body.transactions || [], body.periodCosts || [], body.periodKey || '');
+      const result = syncTransactions(body.transactions || [], body.periodCosts || [], body.periodKey || '', body.newSkuMappings || []);
       return jsonResponse({ status: 'ok', data: result });
     }
 
@@ -806,7 +856,7 @@ function doPost(e) {
       return jsonResponse({ status: 'ok', data: result });
     }
 
-    return jsonResponse({ status: 'error', message: 'Unknown action: ' + action });
+    return jsonResponse({ status: 'error', message: 'Unknown action: ' + action, available_actions: pgDebugModeOn_() ? pgListDispatchedActions_(doPost) : undefined });
   } catch (err) {
     return jsonResponse({ status: 'error', message: err.message, stack: err.stack });
   }
@@ -1460,6 +1510,7 @@ function upsertDecisionCard_(incoming) {
     const row = buildRowFromHeaders_(headers, card, JSON_COLS_LIFECYCLE, OBJECT_JSON_COLS_LIFECYCLE, BOOLEAN_COLS_LIFECYCLE);
     if (rowIndex > 0) sheet.getRange(rowIndex, 1, 1, row.length).setValues([row]);
     else sheet.appendRow(row);
+    upsertDecisionCandidateProjection_(card);
     return { status: 'ok', action: rowIndex > 0 ? 'updated' : 'created', cardId: card.id, asin: asin };
   } finally {
     lock.releaseLock();
@@ -1484,6 +1535,58 @@ function mergeDecisionCard_(existing, incoming) {
   if (existing.current_landed_cost) merged.current_landed_cost = existing.current_landed_cost;
   if (existing.supplier_1688_url) merged.supplier_1688_url = existing.supplier_1688_url;
   return merged;
+}
+
+/** decision_pack互換用。product_lifecycleを正本とし、このシートは投影として扱う。 */
+function upsertDecisionCandidateProjection_(card) {
+  const ss = getSpreadsheet_();
+  let sheet = ss.getSheetByName('keepa_research_candidates');
+  if (!sheet) sheet = ss.insertSheet('keepa_research_candidates');
+  const required = ['asin','fetched_at','category_name','price_min','price_max','amazon_url','keepa_url',
+    'title','brand','status','monthly_sold','offer_count','fba_count','image_count','has_aplus',
+    'source_pipeline','rule_version','screen_result'];
+  if (sheet.getLastRow() === 0) sheet.getRange(1, 1, 1, required.length).setValues([required]);
+  const currentHeaders = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0].map(String);
+  const missing = required.filter(function(h) { return currentHeaders.indexOf(h) < 0; });
+  if (missing.length) sheet.getRange(1, currentHeaders.length + 1, 1, missing.length).setValues([missing]);
+  const headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0].map(String);
+  const pack = card.keepa_data || {}, pf = pack.product_facts || {}, pg = pack.page_facts || {};
+  const mf = pack.market_facts || {}, screen = pack.decision_screen || {};
+  const record = {
+    asin: card.asin, fetched_at: pack.fetched_at || card.updated_at, category_name: card.category || '',
+    price_min: pf.price == null || pf.price === '' ? null : pf.price,
+    price_max: pf.price == null || pf.price === '' ? null : pf.price,
+    amazon_url: card.amazon_url || '', keepa_url: (card.urls || []).filter(function(u){ return String(u).indexOf('keepa.com') >= 0; })[0] || '',
+    title: card.title || pf.title || '', brand: pf.brand || '', status: 'ATLAS候補',
+    monthly_sold: pf.monthly_sold === '' ? null : pf.monthly_sold,
+    offer_count: mf.total_offer_count == null ? null : mf.total_offer_count,
+    fba_count: mf.fba_offer_count == null ? null : mf.fba_offer_count,
+    image_count: pg.image_count == null || pg.image_count === '' ? null : pg.image_count,
+    has_aplus: pg.has_aplus == null ? null : pg.has_aplus,
+    source_pipeline: screen.pipeline, rule_version: screen.rule_version || '', screen_result: screen.result || ''
+  };
+  let targetRow = -1;
+  let existingRow = null;
+  if (sheet.getLastRow() >= 2) {
+    const asinCol = headers.indexOf('asin') + 1;
+    const values = sheet.getRange(2, asinCol, sheet.getLastRow() - 1, 1).getValues();
+    for (let i = 0; i < values.length; i++) {
+      if (String(values[i][0] || '').trim().toUpperCase() === card.asin) {
+        targetRow = i + 2;
+        existingRow = sheet.getRange(targetRow, 1, 1, headers.length).getValues()[0];
+        break;
+      }
+    }
+  }
+  if (existingRow) {
+    const currentStatus = String(existingRow[headers.indexOf('status')] || '').trim();
+    if (currentStatus && currentStatus !== '未確認' && currentStatus !== 'ATLAS候補') record.status = currentStatus;
+  }
+  const row = headers.map(function(h, i) {
+    return Object.prototype.hasOwnProperty.call(record, h) ? record[h] : (existingRow ? existingRow[i] : '');
+  });
+  if (targetRow > 0) sheet.getRange(targetRow, 1, 1, row.length).setValues([row]);
+  else sheet.appendRow(row);
 }
 
 function setAtlasConnection(url, apiKey) {
@@ -3071,8 +3174,14 @@ function setupTransactionSheets() {
 // Step 4: syncTransactions() - トランザクション取り込み
 // ============================================
 
-function syncTransactions(transactions, periodCosts, periodKey) {
+function syncTransactions(transactions, periodCosts, periodKey, newSkuMappings) {
   if (!periodKey) throw new Error('periodKey が必要です。');
+
+  // ── 新商品検知(売上取込側)で確定したsku→asinマッピングをsku_masterへ先に反映 ──
+  // これをbuildSkuToAsinMap_より前に行うことで、今回の取込分から即座に解決できるようにする。
+  if (newSkuMappings && newSkuMappings.length) {
+    applyNewSkuMappings_(newSkuMappings);
+  }
 
   // ── sku_master から {sku: asin} マップ ──
   const skuToAsin = buildSkuToAsinMap_();
@@ -3169,6 +3278,54 @@ function syncTransactions(transactions, periodCosts, periodKey) {
   };
 }
 
+
+// ── 新商品検知(売上取込側)で入力されたsku→asinマッピングをsku_masterへ反映 ──
+// 既存SKUならasin(未設定時)・商品名(未設定時)を補完し、新規SKUなら行を追加する。
+function applyNewSkuMappings_(mappings) {
+  const ss = getSpreadsheet_();
+  let sheet = ss.getSheetByName(SHEET_SKU_MASTER);
+  if (!sheet) {
+    sheet = ss.insertSheet(SHEET_SKU_MASTER);
+    sheet.getRange(1, 1, 1, REQUIRED_HEADERS_SKU_MASTER.length).setValues([REQUIRED_HEADERS_SKU_MASTER]);
+  }
+  const data = sheet.getDataRange().getValues();
+  const headers = data[0];
+  const skuIdx  = headers.indexOf('sku');
+  const asinIdx = headers.indexOf('asin');
+  const nameIdx = headers.indexOf('product_name');
+  const dateIdx = headers.indexOf('updated_at');
+
+  const existingSkuRow = {};
+  for (let i = 1; i < data.length; i++) {
+    const sku = String(data[i][skuIdx] || '').trim();
+    if (sku) existingSkuRow[sku] = i + 1;
+  }
+
+  const now = new Date().toISOString();
+  const newRows = [];
+
+  mappings.forEach(m => {
+    const sku  = String((m && m.sku)  || '').trim();
+    const asin = String((m && m.asin) || '').trim().toUpperCase();
+    if (!sku || !asin) return;
+    const title = String((m && m.title) || '').trim();
+    if (existingSkuRow[sku]) {
+      const rowNum = existingSkuRow[sku];
+      if (!data[rowNum - 1][asinIdx]) sheet.getRange(rowNum, asinIdx + 1).setValue(asin);
+      if (title && !data[rowNum - 1][nameIdx]) sheet.getRange(rowNum, nameIdx + 1).setValue(title);
+      sheet.getRange(rowNum, dateIdx + 1).setValue(now);
+    } else {
+      newRows.push([sku, asin, '', title, now]);
+      existingSkuRow[sku] = -1;
+    }
+  });
+
+  if (newRows.length) {
+    sheet.getRange(sheet.getLastRow() + 1, 1, newRows.length, 5).setValues(newRows);
+  }
+
+  Logger.log(`applyNewSkuMappings_: ${newRows.length}件追加`);
+}
 
 // ── sku_master から {sku: asin} マップを生成 ──
 function buildSkuToAsinMap_() {
@@ -3461,8 +3618,6 @@ function calculateMovingAverageActuals_() {
   });
 
   const byPeriodAsin = {};
-  // 日別粗利でも月次と同じ移動平均台帳を使えるよう、明細ごとの原価割当を保持する。
-  const perTxCostById = {};
   const ensure = (period, asin) => {
     const key = period + '__' + asin;
     if (!byPeriodAsin[key]) {
@@ -3529,9 +3684,6 @@ function calculateMovingAverageActuals_() {
       fallbackCost: meta ? meta.currentLandedCost : null,
       manualFallback: manualFallbacks[sku] || null
     });
-    Object.keys(ledger.perTxCost || {}).forEach(txId => {
-      perTxCostById[txId] = ledger.perTxCost[txId];
-    });
     Object.keys(ledger.periodCogs).forEach(period => {
       if (!asin) return;
       const s = ensure(period, asin);
@@ -3553,137 +3705,7 @@ function calculateMovingAverageActuals_() {
     });
   });
 
-  return { byPeriodAsin, txRows, reorderRows, asinMeta, skuToAsin, perTxCostById };
-}
-
-function dailyProfitDateKey_(value) {
-  const date = parseDate_(value);
-  if (!date) return '';
-  return Utilities.formatDate(date, Session.getScriptTimeZone() || 'Asia/Tokyo', 'yyyy-MM-dd');
-}
-
-// 月次粗利と同じ移動平均原価台帳から、日別・商品別の粗利貢献を組み立てる。
-function buildDailyProfitDetails_(calc, periodKey) {
-  const daily = {};
-  calc.txRows.filter(tx => tx.period === periodKey).forEach(tx => {
-    const date = dailyProfitDateKey_(tx.date);
-    if (!date) return;
-    const asin = tx.asin || calc.skuToAsin[tx.sku] || '';
-    const productKey = asin || ('sku:' + tx.sku);
-    const meta = calc.asinMeta[asin] || {};
-    if (!daily[date]) daily[date] = { date, net:0, sales_taxin:0, qty:0, return_qty:0, gross_profit:0, missing_cost_count:0, products:{} };
-    const day = daily[date];
-    if (!day.products[productKey]) {
-      day.products[productKey] = {
-        asin:asin,
-        sku:asin ? '' : tx.sku,
-        title:meta.title || asin || tx.sku || '未紐付き商品',
-        subtitle:meta.subtitle || '',
-        emoji:meta.emoji || '📦',
-        qty:0,
-        return_qty:0,
-        sales_taxin:0,
-        net:0,
-        cogs:0,
-        gross_profit:0,
-        cost_complete:true,
-        cost_sources:{}
-      };
-    }
-    const product = day.products[productKey];
-    const qty = Math.abs(Number(tx.qty) || 0);
-    const isReturn = tx.type === '返金';
-    const allocation = calc.perTxCostById[tx.id] || null;
-    const signedCogs = allocation && allocation.amount != null
-      ? (isReturn ? -Number(allocation.amount) : Number(allocation.amount))
-      : null;
-
-    day.net += Number(tx.net) || 0;
-    day.sales_taxin += Number(tx.salesTaxin) || 0;
-    product.net += Number(tx.net) || 0;
-    product.sales_taxin += Number(tx.salesTaxin) || 0;
-    if (isReturn) {
-      day.return_qty += qty;
-      product.return_qty += qty;
-    } else {
-      day.qty += qty;
-      product.qty += qty;
-    }
-
-    if (signedCogs === null) {
-      day.missing_cost_count++;
-      product.cost_complete = false;
-    } else {
-      const contribution = (Number(tx.net) || 0) - signedCogs;
-      day.gross_profit += contribution;
-      product.cogs += signedCogs;
-      product.gross_profit += contribution;
-      const source = String(allocation.costSource || 'moving_average');
-      product.cost_sources[source] = true;
-    }
-  });
-
-  return Object.keys(daily).sort().map(date => {
-    const day = daily[date];
-    const products = Object.keys(day.products).map(key => {
-      const product = day.products[key];
-      return {
-        asin:product.asin,
-        sku:product.sku,
-        title:product.title,
-        subtitle:product.subtitle,
-        emoji:product.emoji,
-        qty:Math.round(product.qty),
-        return_qty:Math.round(product.return_qty),
-        sales_taxin:Math.round(product.sales_taxin),
-        net:Math.round(product.net),
-        cogs:Math.round(product.cogs),
-        gross_profit:product.cost_complete ? Math.round(product.gross_profit) : null,
-        cost_complete:product.cost_complete,
-        cost_sources:Object.keys(product.cost_sources)
-      };
-    }).sort((a, b) => (b.gross_profit == null ? -Infinity : b.gross_profit) - (a.gross_profit == null ? -Infinity : a.gross_profit));
-    const roundedDayGross = Math.round(day.gross_profit);
-    if (!day.missing_cost_count && products.length) {
-      const productTotal = products.reduce((sum, product) => sum + (Number(product.gross_profit) || 0), 0);
-      const productAdjustment = roundedDayGross - productTotal;
-      if (productAdjustment) {
-        const targetProduct = products.reduce((best, product) =>
-          Math.abs(Number(product.gross_profit) || 0) > Math.abs(Number(best.gross_profit) || 0) ? product : best
-        , products[0]);
-        targetProduct.gross_profit += productAdjustment;
-      }
-    }
-    return {
-      date:day.date,
-      net:Math.round(day.net),
-      sales_taxin:Math.round(day.sales_taxin),
-      qty:Math.round(day.qty),
-      return_qty:Math.round(day.return_qty),
-      gross_profit:day.missing_cost_count ? null : roundedDayGross,
-      known_gross_profit:roundedDayGross,
-      cost_complete:day.missing_cost_count === 0,
-      missing_cost_count:day.missing_cost_count,
-      products:products
-    };
-  });
-}
-
-function reconcileDailyGrossProfit_(days, monthlyGrossProfit) {
-  if (!days.length || days.some(day => !day.cost_complete)) return days;
-  const dailyTotal = days.reduce((sum, day) => sum + (Number(day.gross_profit) || 0), 0);
-  const adjustment = Math.round(Number(monthlyGrossProfit) || 0) - dailyTotal;
-  if (!adjustment) return days;
-  const targetDay = days[days.length - 1];
-  targetDay.gross_profit += adjustment;
-  targetDay.known_gross_profit += adjustment;
-  if (targetDay.products && targetDay.products.length) {
-    const targetProduct = targetDay.products.reduce((best, product) =>
-      Math.abs(Number(product.gross_profit) || 0) > Math.abs(Number(best.gross_profit) || 0) ? product : best
-    , targetDay.products[0]);
-    if (targetProduct.gross_profit != null) targetProduct.gross_profit += adjustment;
-  }
-  return days;
+  return { byPeriodAsin, txRows, reorderRows, asinMeta };
 }
 
 function buildSalesActualEntry_(s, importedAt) {
@@ -3787,7 +3809,6 @@ function getPeriodSummaryMovingAverage_(periodKey) {
     .reduce((sum, p) => sum + p.gross_profit, 0);
   const totalFixedCosts = periodCosts.reduce((sum, c) => sum + c.amount, 0);
   const operatingProfit = totalGrossProfit + totalFixedCosts;
-  const dailySales = reconcileDailyGrossProfit_(buildDailyProfitDetails_(calc, periodKey), totalGrossProfit);
 
   return {
     periodKey,
@@ -3810,7 +3831,7 @@ function getPeriodSummaryMovingAverage_(periodKey) {
     },
     products,
     periodCosts,
-    dailySales
+    dailySales: getDailySales_(periodKey)
   };
 }
 
@@ -4647,27 +4668,123 @@ function getAvailablePeriods() {
 }
 
 // 日別売上集計（transaction_history から）
-function getDailySales_(periodKey) {
-  const sheet   = getSheetByName_(SHEET_TRANSACTION_HISTORY, REQUIRED_HEADERS_TRANSACTION);
-  const data    = sheet.getDataRange().getValues();
-  const headers = data[0];
-  const periodIdx = headers.indexOf('period_key');
-  const dateIdx   = headers.indexOf('date');
-  const netIdx    = headers.indexOf('net');
-  const typeIdx   = headers.indexOf('transaction_type');
-
-  const dailyMap = {};
-  for (let i = 1; i < data.length; i++) {
-    if (String(data[i][periodIdx]) !== periodKey) continue;
-    if (String(data[i][typeIdx]) !== '注文') continue;
-    const day = String(data[i][dateIdx] || '').slice(0, 10);
-    if (!day) continue;
-    dailyMap[day] = (dailyMap[day] || 0) + (Number(data[i][netIdx]) || 0);
+function toDayString_(dateVal) {
+  if (dateVal instanceof Date) {
+    const y = dateVal.getFullYear();
+    const m = String(dateVal.getMonth() + 1).padStart(2, '0');
+    const d = String(dateVal.getDate()).padStart(2, '0');
+    return `${y}-${m}-${d}`;
   }
+  return String(dateVal || '').slice(0, 10);
+}
 
-  return Object.entries(dailyMap)
-    .sort((a, b) => a[0].localeCompare(b[0]))
-    .map(([date, net]) => ({ date, net: Math.round(net) }));
+// 日別の粗利・商品別内訳。月次の移動平均原価(calculateMovingAverageActuals_)を
+// asinごとの単価としてそのまま日別の数量に適用する(月内は原価が一定という前提は
+// 月次サマリーの粗利計算と同じ)。月次合計と日別合計の粗利が一致するように、
+// 期間サマリーと同じ landed_cost_used / cost_source を再利用する。
+function getDailySales_(periodKey) {
+  const calc = calculateMovingAverageActuals_();
+
+  const perAsinCost = {};
+  Object.keys(calc.byPeriodAsin).forEach(key => {
+    const s = calc.byPeriodAsin[key];
+    if (s.period !== periodKey) return;
+    const entry = buildSalesActualEntry_(s);
+    perAsinCost[s.asin] = {
+      landedCost: entry.landed_cost_used,
+      costSource: entry.cost_source
+    };
+  });
+
+  const dayMap = {};
+  const ensureDay = (day) => {
+    if (!dayMap[day]) dayMap[day] = { date: day, net: 0, sales_taxin: 0, qty: 0, return_qty: 0, byAsin: {} };
+    return dayMap[day];
+  };
+  const ensureProduct = (dayEntry, asin) => {
+    if (!dayEntry.byAsin[asin]) {
+      const meta = calc.asinMeta[asin] || {};
+      dayEntry.byAsin[asin] = {
+        asin,
+        title: meta.title || asin,
+        subtitle: meta.subtitle || '',
+        emoji: meta.emoji || '📦',
+        qty: 0,
+        return_qty: 0,
+        sales_taxin: 0,
+        net: 0
+      };
+    }
+    return dayEntry.byAsin[asin];
+  };
+
+  calc.txRows.forEach(tx => {
+    if (tx.period !== periodKey || !tx.asin) return;
+    const day = toDayString_(tx.date);
+    if (!day) return;
+    const dayEntry = ensureDay(day);
+    const product = ensureProduct(dayEntry, tx.asin);
+
+    if (tx.type === '注文') {
+      dayEntry.net += tx.net;
+      dayEntry.sales_taxin += tx.salesTaxin;
+      dayEntry.qty += tx.qty;
+      product.qty += tx.qty;
+      product.sales_taxin += tx.salesTaxin;
+      product.net += tx.net;
+    } else if (tx.type === '返金') {
+      dayEntry.net += tx.net;
+      dayEntry.sales_taxin += tx.salesTaxin;
+      dayEntry.return_qty += Math.abs(tx.qty);
+      product.return_qty += Math.abs(tx.qty);
+      product.sales_taxin += tx.salesTaxin;
+      product.net += tx.net;
+    }
+  });
+
+  return Object.values(dayMap)
+    .sort((a, b) => a.date.localeCompare(b.date))
+    .map(dayEntry => {
+      const products = Object.values(dayEntry.byAsin).map(p => {
+        const cost = perAsinCost[p.asin];
+        const landedCost = cost ? cost.landedCost : null;
+        const netUnits = p.qty - p.return_qty;
+        const fullyReturned = Math.abs(netUnits) < 0.000001;
+        const cogs = landedCost !== null ? landedCost * netUnits : 0;
+        const grossProfit = (landedCost !== null || fullyReturned) ? Math.round(p.net - cogs) : null;
+        return {
+          asin: p.asin,
+          title: p.title,
+          subtitle: p.subtitle,
+          emoji: p.emoji,
+          qty: Math.round(p.qty),
+          return_qty: Math.round(p.return_qty),
+          sales_taxin: Math.round(p.sales_taxin),
+          net: Math.round(p.net),
+          cogs: Math.round(cogs),
+          gross_profit: grossProfit,
+          cost_complete: grossProfit !== null,
+          cost_sources: cost && cost.costSource ? [cost.costSource] : []
+        };
+      }).sort((a, b) => b.sales_taxin - a.sales_taxin);
+
+      const knownProducts = products.filter(p => p.gross_profit !== null);
+      const missingCount = products.length - knownProducts.length;
+      const knownGrossProfit = knownProducts.reduce((sum, p) => sum + p.gross_profit, 0);
+
+      return {
+        date: dayEntry.date,
+        net: Math.round(dayEntry.net),
+        sales_taxin: Math.round(dayEntry.sales_taxin),
+        qty: Math.round(dayEntry.qty),
+        return_qty: Math.round(dayEntry.return_qty),
+        gross_profit: missingCount === 0 ? Math.round(knownGrossProfit) : null,
+        known_gross_profit: Math.round(knownGrossProfit),
+        cost_complete: missingCount === 0,
+        missing_cost_count: missingCount,
+        products
+      };
+    });
 }
 
 function getLandedCostAtDate_(key, orderDate, reorderByKey) {

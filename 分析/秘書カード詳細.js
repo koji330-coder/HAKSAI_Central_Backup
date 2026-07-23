@@ -55,19 +55,8 @@ function getSecretaryCardDetail_(asin, category) {
   }
 
   if (category === 'リサーチ') {
-    if (product) {
-      const pack=secJson_(product.keepa_data,{}),pf=pack.product_facts||{},pg=pack.page_facts||{},mf=pack.market_facts||{},screen=pack.decision_screen||{};
-      const urls=secJson_(product.urls,[]),keepaUrl=Array.isArray(urls)?(urls.find(function(url){return String(url).indexOf('keepa.com')>=0;})||''):'';
-      const nullable=function(value){if(value===null||value===undefined||String(value).trim()==='')return null;const n=Number(String(value).replace(/[%,]/g,''));return isNaN(n)?null:n;};
-      const price=pf.price==null||pf.price===''?product.price:pf.price;
-      const hasAplus=pg.has_aplus==null?null:(pg.has_aplus===true||String(pg.has_aplus).toUpperCase()==='YES'||String(pg.has_aplus)==='1');
-      out.research={
-        title:String(product.title||pf.title||''),status:String(screen.result||screen.decision||product.status||''),
-        monthly_sold:nullable(pf.monthly_sold==null?product.monthly_sales:pf.monthly_sold),price_min:nullable(price),price_max:nullable(price),
-        offer_count:nullable(mf.total_offer_count),fba_count:nullable(mf.fba_offer_count),image_count:nullable(pg.image_count),
-        has_aplus:hasAplus,keepa_url:String(keepaUrl)
-      };
-    }
+    const candidate=secRows_('keepa_research_candidates').find(function(row){return String(row.asin||'').trim().toUpperCase()===asin;});
+    if(candidate) out.research={title:String(candidate.title||''),status:String(candidate.status||''),monthly_sold:secNum_(candidate.monthly_sold),price_min:secNum_(candidate.price_min),price_max:secNum_(candidate.price_max),offer_count:secNum_(candidate.offer_count),fba_count:secNum_(candidate.fba_count),image_count:secNum_(candidate.image_count),has_aplus:candidate.has_aplus,keepa_url:String(candidate.keepa_url||'')};
   }
   return out;
 }

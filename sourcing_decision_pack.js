@@ -3,7 +3,7 @@ const DP_SHEETS = {
   tx: 'transaction_history',
   sku: 'sku_master',
   reorder: 'reorder_history',
-  lifecycle: 'product_lifecycle',
+  candidates: 'keepa_research_candidates',
   biz: 'business_report_period'
 };
 
@@ -32,39 +32,6 @@ function dpNullableNum_(v) {
   if (v === null || v === undefined || String(v).trim() === '') return null;
   const n = Number(String(v).replace(/[%,]/g, ''));
   return isNaN(n) ? null : n;
-}
-
-function dpJson_(value, fallback) {
-  if (value && typeof value === 'object') return value;
-  try { return JSON.parse(String(value || '')); } catch (e) { return fallback; }
-}
-
-function dpLifecycleCandidate_(row) {
-  if (!row) return null;
-  const pack = dpJson_(row.keepa_data, {});
-  const pf = pack.product_facts || {};
-  const pg = pack.page_facts || {};
-  const mf = pack.market_facts || {};
-  const screen = pack.decision_screen || {};
-  const urls = dpJson_(row.urls, []);
-  const keepaUrl = Array.isArray(urls)
-    ? (urls.find(function(url) { return String(url).indexOf('keepa.com') >= 0; }) || '')
-    : '';
-  const price = pf.price == null || pf.price === '' ? row.price : pf.price;
-  return {
-    asin:String(row.asin || '').trim(),
-    title:String(row.title || pf.title || '').trim() || null,
-    category:String(row.category || '').trim() || null,
-    price_min:dpNullableNum_(price),
-    price_max:dpNullableNum_(price),
-    monthly_sold:dpNullableNum_(pf.monthly_sold == null ? row.monthly_sales : pf.monthly_sold),
-    offer_count:dpNullableNum_(mf.total_offer_count),
-    fba_count:dpNullableNum_(mf.fba_offer_count),
-    image_count:dpNullableNum_(pg.image_count),
-    has_aplus:pg.has_aplus == null ? null : !!pg.has_aplus,
-    keepa_url:String(keepaUrl || '').trim() || null,
-    status:String(screen.result || screen.decision || row.status || '').trim() || null
-  };
 }
 
 function dpCvr_(v) {
@@ -133,8 +100,21 @@ function buildDecisionPack(asin) {
 
   let candidate = null;
   if (asin) {
-    const hit = dpRows_(DP_SHEETS.lifecycle).find(r => String(r.asin || '').trim() === asin);
-    candidate = dpLifecycleCandidate_(hit);
+    const hit = dpRows_(DP_SHEETS.candidates).find(r => String(r.asin).trim() === asin);
+    if (hit) candidate = {
+      asin: hit.asin,
+      title: String(hit.title || '').trim() || null,
+      category: String(hit.category_name || '').trim() || null,
+      price_min: dpNullableNum_(hit.price_min),
+      price_max: dpNullableNum_(hit.price_max),
+      monthly_sold: dpNullableNum_(hit.monthly_sold),
+      offer_count: dpNullableNum_(hit.offer_count),
+      fba_count: dpNullableNum_(hit.fba_count),
+      image_count: dpNullableNum_(hit.image_count),
+      has_aplus: String(hit.has_aplus || '').trim() || null,
+      keepa_url: String(hit.keepa_url || '').trim() || null,
+      status: String(hit.status || '').trim() || null
+    };
   }
 
   const biz = dpRows_(DP_SHEETS.biz);
@@ -187,10 +167,8 @@ function testDecisionPack() {
 }
 
 function testDecisionPackCandidate() {
-  const first = dpRows_(DP_SHEETS.lifecycle).find(function(row) {
-    return String(row.asin || '').trim() && dpJson_(row.keepa_data, {}).product_facts;
-  });
-  if (!first) throw new Error('product_lifecycleにKeepaリサーチカードがありません。');
+  const first = dpRows_(DP_SHEETS.candidates).find(r => String(r.asin || '').trim());
+  if (!first) throw new Error('keepa_research_candidatesにASINがありません。');
   const asin = String(first.asin).trim();
   Logger.log(JSON.stringify({ asin: asin, candidate: buildDecisionPack(asin).candidate }, null, 2));
 }

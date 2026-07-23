@@ -492,31 +492,30 @@ function pgKeepaSeriesSummary_(key, series, parserKind) {
   };
 }
 
-function pgKeepaHistorySummaries_(product) {
-  const seriesDefs = [
-    { key:'new_price', index:1, note:'新品価格' },
-    { key:'sales_rank', index:3, note:'主売れ筋ランキング' },
-    { key:'new_fba', index:10, note:'新品FBA価格' },
-    { key:'new_offer_count', index:11, note:'新品出品者数' },
-    { key:'buy_box', index:18, note:'Buy Box価格（送料込み）', parser:'price_shipping' }
-  ];
-  const csv = Array.isArray(product.csv) ? product.csv : [];
-  const summaries = seriesDefs.map(function(def) {
-    const summary = pgKeepaSeriesSummary_(def.key, csv[def.index], def.parser);
-    summary.note = def.note + (summary.malformed_count ? ' / 不正要素 ' + summary.malformed_count : '');
-    return summary;
-  });
-  if (product.monthlySoldHistory) {
-    const monthly = pgKeepaSeriesSummary_('monthly_sold', product.monthlySoldHistory);
-    monthly.note = 'Amazon過去1か月購入表示';
-    summaries.push(monthly);
-  }
-  Object.keys(product.salesRanks || {}).slice(0, 10).forEach(function(categoryId) {
-    const sub = pgKeepaSeriesSummary_('subcategory_rank:' + categoryId, product.salesRanks[categoryId]);
-    sub.note = 'サブカテゴリランキング';
-    summaries.push(sub);
-  });
-  return summaries;
+function pgKeepaTrialFolder_() {
+  if (!DRIVE_FOLDER_ID) throw new Error('DRIVE_FOLDER_ID が未設定です。');
+  const root = DriveApp.getFolderById(DRIVE_FOLDER_ID);
+  const folders = root.getFoldersByName('keepa_history_trial');
+  return folders.hasNext() ? folders.next() : root.createFolder('keepa_history_trial');
+}
+
+function pgWriteKeepaTrialPreview_(rows) {
+  const ss = getSpreadsheet_();
+  let sheet = ss.getSheetByName(PG_KEEPA_TRIAL_SHEET);
+  if (!sheet) sheet = ss.insertSheet(PG_KEEPA_TRIAL_SHEET);
+  sheet.clearContents();
+  sheet.getRange(1, 1, 1, PG_KEEPA_TRIAL_HEADERS.length).setValues([PG_KEEPA_TRIAL_HEADERS]);
+  if (rows.length) sheet.getRange(2, 1, rows.length, PG_KEEPA_TRIAL_HEADERS.length).setValues(rows.map(function(row) {
+    return PG_KEEPA_TRIAL_HEADERS.map(function(h) { return row[h] !== undefined ? row[h] : ''; });
+  }));
+  sheet.setFrozenRows(1);
+  sheet.autoResizeColumns(1, PG_KEEPA_TRIAL_HEADERS.length);
+}
+
+function pgKeepaTokenStatus_(apiKey) {
+  const response = UrlFetchApp.fetch('https://api.keepa.com/token?key=' + encodeURIComponent(apiKey), { muteHttpExceptions:true });
+  if (response.getResponseCode() !== 200) throw new Error('Keepaトークン確認エラー (HTTP ' + response.getResponseCode() + ')');
+  return JSON.parse(response.getContentText());
 }
 
 function pgMarketHistoryFolders_() {
@@ -651,32 +650,6 @@ function refreshProductMarketHistory_(asinValue, daysValue) {
   return pgStoreKeepaMarketResponse_(json, { checked_at:new Date().toISOString(),from_date:'',to_date:pgDateKey_(new Date()),request_kind:'history+buybox',raw_file_id:raw.getId(),payload_bytes:raw.getSize(),tokens_consumed:Number(json.tokensConsumed)||0,tokens_left:Number(json.tokensLeft)||0 }).data;
 }
 
-function pgKeepaTrialFolder_() {
-  if (!DRIVE_FOLDER_ID) throw new Error('DRIVE_FOLDER_ID が未設定です。');
-  const root = DriveApp.getFolderById(DRIVE_FOLDER_ID);
-  const folders = root.getFoldersByName('keepa_history_trial');
-  return folders.hasNext() ? folders.next() : root.createFolder('keepa_history_trial');
-}
-
-function pgWriteKeepaTrialPreview_(rows) {
-  const ss = getSpreadsheet_();
-  let sheet = ss.getSheetByName(PG_KEEPA_TRIAL_SHEET);
-  if (!sheet) sheet = ss.insertSheet(PG_KEEPA_TRIAL_SHEET);
-  sheet.clearContents();
-  sheet.getRange(1, 1, 1, PG_KEEPA_TRIAL_HEADERS.length).setValues([PG_KEEPA_TRIAL_HEADERS]);
-  if (rows.length) sheet.getRange(2, 1, rows.length, PG_KEEPA_TRIAL_HEADERS.length).setValues(rows.map(function(row) {
-    return PG_KEEPA_TRIAL_HEADERS.map(function(h) { return row[h] !== undefined ? row[h] : ''; });
-  }));
-  sheet.setFrozenRows(1);
-  sheet.autoResizeColumns(1, PG_KEEPA_TRIAL_HEADERS.length);
-}
-
-function pgKeepaTokenStatus_(apiKey) {
-  const response = UrlFetchApp.fetch('https://api.keepa.com/token?key=' + encodeURIComponent(apiKey), { muteHttpExceptions:true });
-  if (response.getResponseCode() !== 200) throw new Error('Keepaトークン確認エラー (HTTP ' + response.getResponseCode() + ')');
-  return JSON.parse(response.getContentText());
-}
-
 /**
  * PERFORMANCE TIMELINE Phase 0: Keepa履歴を1 ASINだけ試験取得する。
  * includeBuybox は試験Aで csv[18] が得られなかった場合だけ true にする。
@@ -710,7 +683,29 @@ function previewKeepaHistoryTrial_(asinValue, daysValue, includeBuybox) {
   const payloadBytes = Utilities.newBlob(text).getBytes().length;
   const stamp = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'yyyyMMdd_HHmmss');
   const rawFile = pgKeepaTrialFolder_().createFile(Utilities.newBlob(text, 'application/json', 'keepa_history_trial_' + asin + '_' + requestKind.charAt(0) + '_' + stamp + '.json'));
-  const summaries = pgKeepaHistorySummaries_(product);
+  const seriesDefs = [
+    { key:'new_price', index:1, note:'新品価格' },
+    { key:'sales_rank', index:3, note:'主売れ筋ランキング' },
+    { key:'new_fba', index:10, note:'新品FBA価格' },
+    { key:'new_offer_count', index:11, note:'新品出品者数' },
+    { key:'buy_box', index:18, note:'Buy Box価格' }
+  ];
+  const csv = Array.isArray(product.csv) ? product.csv : [];
+  const summaries = seriesDefs.map(function(def) {
+    const summary = pgKeepaSeriesSummary_(def.key, csv[def.index]);
+    summary.note = def.note + (summary.malformed_count ? ' / 不正要素 ' + summary.malformed_count : '');
+    return summary;
+  });
+  if (product.monthlySoldHistory) {
+    const monthly = pgKeepaSeriesSummary_('monthly_sold', product.monthlySoldHistory);
+    monthly.note = 'Amazon過去1か月購入表示';
+    summaries.push(monthly);
+  }
+  Object.keys(product.salesRanks || {}).slice(0, 10).forEach(function(categoryId) {
+    const sub = pgKeepaSeriesSummary_('subcategory_rank:' + categoryId, product.salesRanks[categoryId]);
+    sub.note = 'サブカテゴリランキング';
+    summaries.push(sub);
+  });
 
   const tokensConsumed = Number(json.tokensConsumed);
   const tokensLeft = Number(json.tokensLeft);
@@ -734,7 +729,7 @@ function previewKeepaHistoryTrial_(asinValue, daysValue, includeBuybox) {
     tokens_consumed:isFinite(tokensConsumed) ? tokensConsumed : null,
     tokens_left:isFinite(tokensLeft) ? tokensLeft : null,
     raw_file_id:rawFile.getId(),series:summaries,
-    next_step:byKey.buy_box && byKey.buy_box.point_count ? '試験BでBuy Box履歴を確認できました。本番設計へ進めます。' : (useBuybox ? 'Buy Box履歴は未取得です。他系列で本番設計を進めます。' : 'csv[18]が空のため、試験B（includeBuybox=true）を検討してください。')
+    next_step:byKey.buy_box && byKey.buy_box.point_count ? '試験Aのデータで本番設計へ進めます。' : (useBuybox ? 'Buy Box履歴は未取得です。他系列で本番設計を進めます。' : 'csv[18]が空のため、試験B（includeBuybox=true）を検討してください。')
   };
   Logger.log(JSON.stringify(result, null, 2));
   return result;
@@ -743,54 +738,6 @@ function previewKeepaHistoryTrial_(asinValue, daysValue, includeBuybox) {
 // claspからPhase 0の試験Aを引数事故なく1回実行するための固定ラッパー。
 function previewKeepaHistoryTrialB0FXTQPGSB() {
   return previewKeepaHistoryTrial_('B0FXTQPGSB', 365, false);
-}
-
-// 試験Aで csv[18] が空だったため、buybox=1 の試験Bを固定条件で実行する。
-function previewKeepaHistoryTrialB0FXTQPGSBBuybox() {
-  return previewKeepaHistoryTrial_('B0FXTQPGSB', 365, true);
-}
-
-// 保存済みの試験B Raw JSONを再解析する。Keepa APIを呼ばないためトークン消費は0。
-function reanalyzeKeepaHistoryTrialRaw_(rawFileId) {
-  const file = DriveApp.getFileById(String(rawFileId || '').trim());
-  const json = JSON.parse(file.getBlob().getDataAsString('UTF-8'));
-  const product = json.products && json.products[0];
-  if (!product) throw new Error('保存JSONに商品データがありません。');
-  const asin = pgAsin_(product.asin);
-  const summaries = pgKeepaHistorySummaries_(product);
-  const fetchedAt = new Date().toISOString();
-  const requestKind = 'B:raw-reanalysis';
-  const rows = summaries.map(function(summary) {
-    return {
-      asin:asin,fetched_at:fetchedAt,request_kind:requestKind,series_key:summary.series_key,
-      point_count:summary.point_count,first_at:summary.first_at,last_at:summary.last_at,
-      min_value:summary.min_value,max_value:summary.max_value,missing_count:summary.missing_count,
-      payload_bytes:file.getSize(),duration_ms:0,tokens_before:'',tokens_consumed:0,
-      tokens_left:Number(json.tokensLeft) || '',raw_file_id:file.getId(),
-      verdict:summary.point_count ? 'OK' : (summary.series_key === 'sales_rank' ? '要確認' : '未取得'),note:summary.note
-    };
-  });
-  pgWriteKeepaTrialPreview_(rows);
-  const result = { asin:asin,request_kind:requestKind,raw_file_id:file.getId(),tokens_consumed:0,series:summaries,next_step:'保存済みRaw JSONの再解析が完了しました。本番設計へ進めます。' };
-  Logger.log(JSON.stringify(result, null, 2));
-  return result;
-}
-
-function reanalyzeKeepaHistoryTrialBRawB0FXTQPGSB() {
-  return reanalyzeKeepaHistoryTrialRaw_('18qPztceEm6LtIByAf_5mvj2s84jMNMYc');
-}
-
-// 試験Bの保存済みRaw JSONを本番の正規化履歴へ初期登録する（Keepa消費0）。
-function importKeepaHistoryTrialBRawB0FXTQPGSB() {
-  const file = DriveApp.getFileById('18qPztceEm6LtIByAf_5mvj2s84jMNMYc');
-  const json = JSON.parse(file.getBlob().getDataAsString('UTF-8'));
-  const result = pgStoreKeepaMarketResponse_(json, {
-    checked_at:new Date().toISOString(),from_date:'2025-07-19',to_date:'2026-07-18',
-    request_kind:'trial-b-import',raw_file_id:file.getId(),payload_bytes:file.getSize(),
-    tokens_consumed:0,tokens_left:Number(json.tokensLeft) || 0
-  });
-  Logger.log(JSON.stringify({ history_id:result.history_id,normalized_file_id:result.normalized_file_id,tokens_consumed:0 }, null, 2));
-  return result.data;
 }
 
 function refreshOwnListingSnapshot_(asinValue) {
