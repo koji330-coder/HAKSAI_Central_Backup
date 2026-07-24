@@ -32,7 +32,9 @@ const CENTRAL_PROTECTED_POST_ACTIONS_ = new Set([
   'previewAdProductReport', 'syncAdProductReport', 'syncBusinessReport', 'createDomesticOrder',
   'updateDomesticOrder', 'cancelDomesticOrder', 'receiveDomesticOrder', 'saveProductAction',
   'archiveProductAction', 'refreshOwnListingSnapshot', 'refreshProductMarketHistory',
-  'consultProductGrowthMaika', 'sendProductConsultationMessage', 'saveProductContextNote'
+  'consultProductGrowthMaika', 'sendProductConsultationMessage', 'saveProductContextNote',
+  'createPageProject', 'updatePageProject', 'extractPageInputs', 'adoptExtractedInputAsSupplier',
+  'generatePageDraft'
 ]);
 
 const PROPS = PropertiesService.getScriptProperties();
