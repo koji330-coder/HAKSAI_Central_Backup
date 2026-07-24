@@ -32,10 +32,13 @@ const CENTRAL_PROTECTED_POST_ACTIONS_ = new Set([
   'previewAdProductReport', 'syncAdProductReport', 'syncBusinessReport', 'createDomesticOrder',
   'updateDomesticOrder', 'cancelDomesticOrder', 'receiveDomesticOrder', 'saveProductAction',
   'archiveProductAction', 'refreshOwnListingSnapshot', 'refreshProductMarketHistory',
-  'consultProductGrowthMaika', 'sendProductConsultationMessage', 'saveProductContextNote',
-  'createPageProject', 'updatePageProject', 'extractPageInputs', 'adoptExtractedInputAsSupplier',
-  'generatePageDraft', 'generateRakumartSearchBrief'
+  'consultProductGrowthMaika', 'sendProductConsultationMessage', 'saveProductContextNote'
 ]);
+// createPageProject/updatePageProject/extractPageInputs/adoptExtractedInputAsSupplier/
+// generatePageDraft/generateRakumartSearchBrief は旧GitHub Pages版(index.html)の
+// ページ制作タブも同じactionを直接呼んでいる(secretなしでapiPost)ため、ここには入れない。
+// 入れると centralAuthOk_ に弾かれ旧アプリのページ制作機能が壊れる。
+// React側はCloudflare Pages Functionsのactions.tsホワイトリストのみで十分に絞られている。
 
 const PROPS = PropertiesService.getScriptProperties();
 const GEMINI_API_KEY = PROPS.getProperty('GEMINI_API_KEY');
