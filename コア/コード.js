@@ -34,7 +34,7 @@ const CENTRAL_PROTECTED_POST_ACTIONS_ = new Set([
   'archiveProductAction', 'refreshOwnListingSnapshot', 'refreshProductMarketHistory',
   'consultProductGrowthMaika', 'sendProductConsultationMessage', 'saveProductContextNote',
   'createPageProject', 'updatePageProject', 'extractPageInputs', 'adoptExtractedInputAsSupplier',
-  'generatePageDraft'
+  'generatePageDraft', 'generateRakumartSearchBrief'
 ]);
 
 const PROPS = PropertiesService.getScriptProperties();
