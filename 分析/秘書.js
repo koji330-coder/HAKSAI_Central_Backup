@@ -2,6 +2,7 @@
 const SEC_MAX_CARDS_DEFAULT = 20;
 const SEC_LEAD_TIME_DEFAULT = 45;
 const SEC_LEGACY_RESEARCH_GO_LIMIT = 3;
+const SEC_PAGE_STALE_DAYS_ = 3;
 const SEC_SETTINGS_SHEET = 'secretary_settings';
 const SEC_CARDS_SHEET = 'action_cards';
 const SEC_RUN_LOG_SHEET = 'sec_run_log';
@@ -368,6 +369,62 @@ function secGetYesterdayActivitySummary_() {
   };
 }
 
+/**
+ * ページ制作案件の進捗と次のアクションを判定する。
+ * central-frontend/src/utils/pageProjectProgress.ts の derivePageProductionProgress() と同じロジック。
+ * 両者を変更するときは必ずセットで直すこと。
+ */
+function secPageProjectProgress_(project) {
+  const extraTexts = secJson_(project.extra_texts, {});
+  const handoff = secJson_(project.listing_handoff, {});
+  const extracted = secJson_(project.extracted_input, {});
+  const pageDraft = secJson_(project.page_draft, {});
+  const tags = secJson_(project.tags, []);
+  const sourcingBrief = secJson_(project.sourcing_brief, {});
+  const extraImageIds = secJson_(project.extra_image_ids, []);
+  const ownListing = secJson_(project.own_listing, {});
+
+  const shotCount = Array.isArray(extraImageIds) ? extraImageIds.length : 0;
+  const supplier = extracted.supplier || {};
+  const hasUrl = !!String(extraTexts.supplier_url || supplier.url || '').trim();
+  const hasExtraction = !!(extracted._meta);
+  const confirmedFacts = Array.isArray(extracted.confirmed_facts) ? extracted.confirmed_facts : [];
+  const evidenceFacts = (Array.isArray(extracted.evidence) ? extracted.evidence : []).filter(function(ev) {
+    return ev && ev.source_image != null && String(ev.field || '').trim();
+  });
+  const adoptableFacts = confirmedFacts.length ? confirmedFacts : evidenceFacts;
+  const adopted = !!String(handoff.selected_candidate_id || '').trim();
+  const ready = handoff.ready === true;
+  const isAtlas = Array.isArray(tags) && tags.indexOf('ATLAS') >= 0;
+  const sourcingActivity = adopted || Object.keys(sourcingBrief).length > 0
+    || ['supplier_adopted', 'supplier_needs_confirmation'].indexOf(String(project.sourcing_state || '')) >= 0;
+  const gateApplies = isAtlas || sourcingActivity;
+  const gated = gateApplies && !ready;
+  const hasDraft = !!(pageDraft.concept || (Array.isArray(pageDraft.title_candidates) && pageDraft.title_candidates.length));
+  const reviewed = ['ページ案完成', '輸入判断OK'].indexOf(String(project.status || '')) >= 0;
+  const ownListingConnected = !!(ownListing.connected_at || ownListing.primary_asin || ownListing.parent_asin
+    || (Array.isArray(ownListing.child_asins) && ownListing.child_asins.length));
+
+  const missing = [];
+  if (!hasUrl) missing.push('仕入先URL');
+  if (!shotCount) missing.push('スクリーンショット');
+  if (hasExtraction && !adoptableFacts.length) missing.push('根拠付きの確認済み仕様（1件以上）');
+
+  let nextAction = null;
+  if (reviewed && !ownListingConnected) nextAction = { type:'connect_own_asin', label:'自社ASINを紐付ける', reason:'ページ案は完成しています。販売開始後に自社ASINを接続できます。' };
+  else if (reviewed && ownListingConnected) nextAction = { type:'manage_own_listing', label:'販売情報を確認', reason:'完成案件と接続済みの自社ASINを確認できます。' };
+  else if (!reviewed && hasDraft) nextAction = { type:'review_draft', label:'内容を確認して仕上げる', reason:'タイトル・箇条書き・画像構成を確認してください。' };
+  else if (!reviewed && !gated) nextAction = { type:'generate_draft', label:'ページ案を生成', reason:'確認済み仕様だけを使って生成します。' };
+  else if (!reviewed && adopted && !ready) nextAction = { type:'confirm_facts', label:'確認済み仕様を追加', reason:'根拠付きの確認済み仕様が0件です。不足: ' + (missing.join('、') || '確認済み仕様') };
+  else if (!reviewed && hasExtraction && adoptableFacts.length && hasUrl) nextAction = { type:'adopt_extracted_input', label:'この解析結果を仕入先として採用', reason:'解析済みですが、ページ制作へ渡す確認済み仕様がまだ確定していません。' };
+  else if (!reviewed && hasExtraction && !hasUrl) nextAction = { type:'enter_supplier_url', label:'仕入先URLを入力', reason:'仕入先URLがまだ保存されていません。' };
+  else if (!reviewed && hasExtraction) nextAction = { type:'confirm_facts', label:'根拠が写ったスクショを追加して再抽出', reason:'解析結果に根拠付きの事実がありません。' };
+  else if (!reviewed && shotCount) nextAction = { type:'extract_inputs', label:'スクショから必要事項を抽出', reason:'Gemini解析がまだ実行されていません。' };
+  else if (!reviewed) nextAction = { type:'add_screenshots', label:'仕入先URLとスクショを追加', reason:'仕入先の素材がまだありません。' };
+
+  return { nextAction:nextAction, gated:gated, missing:missing, reviewed:reviewed };
+}
+
 function secAppendResearchEvents_(events, lifecycleRows) {
   const byId = {}, byAsin = {}, usedAsins = {};
   lifecycleRows.forEach(function(row) {
@@ -388,27 +445,36 @@ function secAppendResearchEvents_(events, lifecycleRows) {
 
     const asin = String(source.asin || ((pageDraft.atlas_fact_pack || {}).asin) || '').trim().toUpperCase();
     if (asin) usedAsins[asin] = true;
-    const sourcingState = String(project.sourcing_state || '').trim();
+
     const pageStatus = String(project.status || '').trim();
-    const handoff = secJson_(project.listing_handoff, {});
-    const needsSupplier = sourcingState === 'needs_search_brief' || sourcingState === 'supplier_needs_confirmation'
-      || sourcingState === '仕入先調査中' || sourcingState === '仕入判断中'
-      || (sourcingState && handoff.ready !== true && handoff.ready !== 'true');
-    const hasDraft = !!(pageDraft.concept || (Array.isArray(pageDraft.title_candidates) && pageDraft.title_candidates.length));
-    const action = needsSupplier ? 'ラクマート検索指示書または仕入候補確認を進める'
-      : hasDraft ? 'ページ案の入稿判断と不足素材を確認する'
-      : 'ページ制作パックを生成する';
-      
+    if (pageStatus === '撤退') return;
+
+    const progress = secPageProjectProgress_(project);
+    if (progress.reviewed) return; // 完成・輸入判断OK済みは自社ASIN連携等の別導線に任せ、秘書ではもう追わない
+
+    const updatedAt = secDate_(project.updated_at || project.created_at);
+    const daysSinceUpdate = updatedAt && !isNaN(updatedAt.getTime())
+      ? Math.max(0, Math.floor((Date.now() - updatedAt.getTime()) / 864e5)) : 999;
+    const isQuickWin = progress.nextAction && ['adopt_extracted_input', 'adopt_candidate'].indexOf(progress.nextAction.type) >= 0;
+    // 停滞もしておらず、1タップで進む案件でもないなら今日はまだ出さない(毎日全件出ると埋もれるため)
+    if (daysSinceUpdate < SEC_PAGE_STALE_DAYS_ && !isQuickWin) return;
+
     // 人間メモと概算シミュレーションデータの引渡し
     const extraTexts = secJson_(project.extra_texts, {});
     const userMemo = String(extraTexts.target_notes || extraTexts.free_memo || '').trim() || String(project.memo || '').trim();
     const roughSim = secJson_(project.cost_simulation || project.profit, null);
+    const priority = daysSinceUpdate >= 7 ? 'P1' : 'P2';
+    const staleNote = daysSinceUpdate >= SEC_PAGE_STALE_DAYS_ ? (daysSinceUpdate + '日間更新なし。') : '';
+    const nextLabel = (progress.nextAction && progress.nextAction.label) || 'ページ制作パックを生成する';
+    const nextReason = (progress.nextAction && progress.nextAction.reason) || '';
 
     events.push({ type:'atlas_page_project_followup', event_key:'atlas_page_project_followup:' + (project.id || sourceId || asin), asin:asin,
-      name:String(project.title || source.title || asin || 'ATLASページ案件').slice(0,40), priority:'P2', category:'リサーチ',
-      detail:'状態: ' + (pageStatus || '未設定') + '／仕入探索: ' + (sourcingState || '未設定') + '。' + (userMemo ? '人間メモ:「' + userMemo.slice(0, 100) + '」' : ''),
-      next_action:action, route:'page-project',
-      facts:{ source_card_id:sourceId, page_project_id:project.id || '', status:pageStatus, sourcing_state:sourcingState, has_page_draft:hasDraft, has_supplier_handoff:!!handoff.ready, user_memo:userMemo, cost_simulation:roughSim } });
+      name:String(project.title || source.title || asin || 'ATLASページ案件').slice(0,40), priority:priority, category:'リサーチ',
+      detail:staleNote + '状態: ' + (pageStatus || '未設定') + '。' + nextReason + (userMemo ? ' 人間メモ:「' + userMemo.slice(0, 100) + '」' : ''),
+      next_action:nextLabel, route:'page-project',
+      facts:{ source_card_id:sourceId, page_project_id:project.id || '', status:pageStatus, sourcing_state:String(project.sourcing_state || ''),
+        days_since_update:daysSinceUpdate, next_action_type:(progress.nextAction && progress.nextAction.type) || '',
+        missing:progress.missing, user_memo:userMemo, cost_simulation:roughSim } });
   });
 
   lifecycleRows.forEach(function(row) {
@@ -835,9 +901,23 @@ function updateSecretaryCard_(data) {
   throw new Error('card not found: ' + id);
 }
 
+/** 毎朝5時のトリガー本体。ルール検知(runDailyBrief)の後に横断AIレビュー(runAiPortfolioReview_)も続けて実行し、
+ * 「今日の横断レビュー」カードと個別のpriority_actionsカードを追加する。 */
+function runDailyBriefFull(opts) {
+  const brief = runDailyBrief(opts);
+  let review = null;
+  try {
+    review = runAiPortfolioReview_({ trigger:'daily' });
+  } catch (e) {
+    Logger.log('AI横断レビュー(daily)失敗: ' + e);
+  }
+  return { brief:brief, review:review };
+}
+
 function setupSecretaryDailyTrigger() {
-  ScriptApp.getProjectTriggers().filter(function(t) { return t.getHandlerFunction() === 'runDailyBrief'; })
-    .forEach(function(t) { ScriptApp.deleteTrigger(t); });
-  ScriptApp.newTrigger('runDailyBrief').timeBased().everyDays(1).atHour(5).create();
+  ScriptApp.getProjectTriggers().filter(function(t) {
+    return t.getHandlerFunction() === 'runDailyBrief' || t.getHandlerFunction() === 'runDailyBriefFull';
+  }).forEach(function(t) { ScriptApp.deleteTrigger(t); });
+  ScriptApp.newTrigger('runDailyBriefFull').timeBased().everyDays(1).atHour(5).create();
   return { status:'ok', hour:5 };
 }

@@ -91,12 +91,37 @@ function airAppendCards_(runId,actions,input) {
   if(rows.length)sh.getRange(sh.getLastRow()+1,1,rows.length,headers.length).setValues(rows);return rows.length;
 }
 
+/** executive_summary/today_focus/secretary_voiceを、priority_actionsとは別枠の「今日の横断レビュー」1枚カードとして保存する。 */
+function airAppendSummaryCard_(runId, output, input) {
+  const dedupeKey = 'AI_SUMMARY|' + secToday_();
+  const existing = secCardObjects_();
+  if (existing.some(function(c) { return c.dedupe_key === dedupeKey && (c.status === 'open' || c.status === 'snoozed'); })) return 0;
+  const sh = secEnsureCardsSheet_();
+  const headers = sh.getRange(1, 1, 1, sh.getLastColumn()).getValues()[0].map(String);
+  const voice = output.secretary_voice || {};
+  const focus = output.today_focus || {};
+  const body = [output.executive_summary || '', voice.comment || ''].filter(Boolean).join('\n\n');
+  const nextAction = focus.title ? ('まず見るべき: ' + focus.title + (focus.why ? '（' + focus.why + '）' : '')) : '';
+  const obj = {
+    card_id: Utilities.getUuid(), created_date: secToday_(), priority: 'P2', category: 'その他',
+    asin: '', title: voice.opening || '今日の横断レビュー', body: body,
+    next_action: nextAction, route: '', impact_note: voice.encouragement || '',
+    status: 'open', status_updated_at: '', dismiss_reason: '', snooze_until: '',
+    event_key: 'ai_review_summary:' + runId, event_fingerprint: secHash_(body), source_detail: body,
+    facts_json: JSON.stringify({ portfolio_diagnosis: output.portfolio_diagnosis || [], data_gaps: output.data_gaps || [], confidence: output.confidence || {} }),
+    source: 'ai_review', review_run_id: runId, dedupe_key: dedupeKey,
+    evidence_json: '[]', why_now: '', uncertainties_json: JSON.stringify(output.questions_for_owner || [])
+  };
+  sh.getRange(sh.getLastRow() + 1, 1, 1, headers.length).setValues([headers.map(function(h) { return obj[h] == null ? '' : obj[h]; })]);
+  return 1;
+}
+
 function runAiPortfolioReview_(opts) {
   opts=opts||{}; const started=Date.now(), input=airBuildInput_(), runId='R-'+secToday_().replace(/-/g,'')+'-'+Utilities.formatDate(new Date(),'Asia/Tokyo','HHmmss');
   let status='success', output, validation=[] ,model=GEMINI_MODEL||'gemini-3.1-flash-lite';
   try{const ai=airCallGemini_(input), checked=airValidate_(ai.output,input);output=checked.output;validation=checked.log;model=ai.model;}
   catch(e){status='fallback';validation.push(String(e));const first=input.signals.slice().sort(function(a,b){return a.severity-b.severity;})[0];output={executive_summary:'AI分析を取得できなかったため、検出事実のみを表示しています。',today_focus:first?{title:first.product_name,why:first.note,action_ref:''}:{title:'緊急の検出事項はありません',why:'対象signalは0件です',action_ref:''},portfolio_diagnosis:[],priority_actions:[],questions_for_owner:[],data_gaps:['AIレビュー取得失敗'],confidence:{level:'low',reason:'フォールバック'},secretary_voice:{opening:'',comment:'検出事実だけを確認できる状態です。',encouragement:'必要なところから一つずつ見ていきましょう。'}};}
-  const snapshot=airSaveSnapshot_(runId,input);airAppendCards_(runId,output.priority_actions||[],input);
+  const snapshot=airSaveSnapshot_(runId,input);airAppendCards_(runId,output.priority_actions||[],input);airAppendSummaryCard_(runId,output,input);
   const rec={run_id:runId,review_type:'daily',review_date:secToday_(),trigger:opts.trigger||'manual',status:status,prompt_version:AIR_PROMPT_VERSION,schema_version:1,model:model,input_snapshot_file_id:snapshot,output_json:JSON.stringify(output),latency_ms:Date.now()-started,validation_log:JSON.stringify(validation),created_at:new Date().toISOString()};
   const sh=airSheet_();sh.appendRow(AIR_RUN_HEADERS.map(function(h){return rec[h]==null?'':rec[h];}));return{run_id:runId,status:status,review:output,created_cards:(output.priority_actions||[]).length};
 }
