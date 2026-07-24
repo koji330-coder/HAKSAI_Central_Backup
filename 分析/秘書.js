@@ -901,9 +901,40 @@ function updateSecretaryCard_(data) {
   throw new Error('card not found: ' + id);
 }
 
-/** 毎朝5時のトリガー本体。ルール検知(runDailyBrief)の後に横断AIレビュー(runAiPortfolioReview_)も続けて実行し、
+/**
+ * 秘書カードから「グロースカルテで相談」して実際にアクションを記録した場合、そのカードを自動でdoneにする。
+ * アクションのtagsに「秘書:<card_id>」が付いていれば、対応する秘書カードは既に対応済みとみなす。
+ * 「相談しただけ」では完了扱いにせず、実際に記録が残った時だけ完了にするための仕組み。
+ */
+function secAutoResolveConsultedCards_() {
+  const cards = secCardObjects_().filter(function(c) { return c.status === 'open' || c.status === 'snoozed'; });
+  if (!cards.length) return 0;
+  const actions = typeof getAllProductActions_ === 'function' ? getAllProductActions_(false) : [];
+  const resolvedCardIds = new Set();
+  actions.forEach(function(action) {
+    (Array.isArray(action.tags) ? action.tags : []).forEach(function(tag) {
+      const m = String(tag || '').match(/^秘書:(.+)$/);
+      if (m) resolvedCardIds.add(m[1]);
+    });
+  });
+  let resolved = 0;
+  cards.forEach(function(card) {
+    if (!resolvedCardIds.has(String(card.card_id))) return;
+    try { updateSecretaryCard_({ id: card.card_id, status: 'done' }); resolved++; }
+    catch (e) { Logger.log('秘書カード自動完了失敗: ' + e); }
+  });
+  return resolved;
+}
+
+/** 毎朝5時のトリガー本体。まず「相談から実際に記録された」秘書カードを自動完了し、
+ * その後ルール検知(runDailyBrief)→横断AIレビュー(runAiPortfolioReview_)の順に実行して、
  * 「今日の横断レビュー」カードと個別のpriority_actionsカードを追加する。 */
 function runDailyBriefFull(opts) {
+  try {
+    secAutoResolveConsultedCards_();
+  } catch (e) {
+    Logger.log('秘書カード自動完了(daily)失敗: ' + e);
+  }
   const brief = runDailyBrief(opts);
   let review = null;
   try {
