@@ -411,3 +411,102 @@ function receiveDomesticOrder_(id, actualArrivalDate) {
     lock.releaseLock();
   }
 }
+
+// 発注・原価履歴タブの「重複候補チェック」「商品別タイムライン」から、
+// 誤って重複登録された行や、ツール完成前の手入力データを削除するために使う。
+// reorder_historyは基本ログとして追記式で扱ってきたが、データクレンジング用途として
+// 削除だけは例外的に許可する(編集は引き続きupdateReorderRecord/国内仕入れ側で行う)。
+function deleteReorderRecord_(recordId) {
+  const id = domesticText_(recordId);
+  if (!id) throw new Error('recordIdが必要です。');
+  const lock = LockService.getScriptLock();
+  lock.waitLock(30000);
+  try {
+    const sheet = getSheetByName_(SHEET_REORDER_HISTORY, REQUIRED_HEADERS_REORDER);
+    const values = sheet.getDataRange().getValues();
+    const headers = values[0].map(function(value) { return domesticText_(value); });
+    const idIndex = headers.indexOf('id');
+    const pidIndex = headers.indexOf('product_id');
+    let targetRow = -1;
+    let productId = '';
+    for (let i = 1; i < values.length; i++) {
+      if (domesticText_(values[i][idIndex]) !== id) continue;
+      targetRow = i + 1;
+      productId = domesticText_(values[i][pidIndex]);
+      break;
+    }
+    if (targetRow < 0) throw new Error('発注履歴が見つかりません: ' + id);
+    sheet.deleteRow(targetRow);
+
+    // 削除後、その商品に残っている履歴のうち最新入荷日のものを現在原価として再設定する。
+    // 残りが無ければcurrent_landed_costには触れない(空にすると粗利計算に影響するため)。
+    if (productId) {
+      const remaining = sheet.getDataRange().getValues();
+      if (remaining.length > 1) {
+        const rHeaders = remaining[0].map(function(value) { return domesticText_(value); });
+        const rPidIndex = rHeaders.indexOf('product_id');
+        const rDateIndex = rHeaders.indexOf('order_date');
+        const rCostIndex = rHeaders.indexOf('landed_cost_actual');
+        let latest = null;
+        for (let i = 1; i < remaining.length; i++) {
+          if (domesticText_(remaining[i][rPidIndex]) !== productId) continue;
+          const date = domesticDate_(remaining[i][rDateIndex]);
+          const cost = domesticNumber_(remaining[i][rCostIndex]);
+          if (!latest || date > latest.date) latest = { date: date, cost: cost };
+        }
+        if (latest && latest.cost > 0) updateProductCurrentLandedCost(productId, latest.cost);
+      }
+    }
+    return { status: 'ok', id: id };
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+const SHEET_PURCHASE_NOTES = 'purchase_notes';
+const REQUIRED_HEADERS_PURCHASE_NOTES = ['id', 'product_id', 'asin', 'content', 'created_at'];
+
+// 仕入に関するメモ専用の独立シート。商品グロースカルテのproduct_context_notesは
+// マイカのAIコンテキストへ絞り込み無しでそのまま読み込まれるため、仕入の注意点等を
+// そちらに混ぜるとグロースカルテ側の相談に無関係な情報が混入してしまう。
+// それを避けるため、あえて別シートとして独立させている。
+function getPurchaseNotes_(productId) {
+  const pid = domesticText_(productId);
+  if (!pid) throw new Error('product_idが必要です。');
+  const sheet = getSheetByName_(SHEET_PURCHASE_NOTES, REQUIRED_HEADERS_PURCHASE_NOTES);
+  const values = sheet.getDataRange().getValues();
+  if (values.length <= 1) return [];
+  const headers = values[0].map(function(value) { return domesticText_(value); });
+  const at = function(row, name) { const index = headers.indexOf(name); return index >= 0 ? row[index] : ''; };
+  return values.slice(1)
+    .filter(function(row) { return domesticText_(at(row, 'product_id')) === pid; })
+    .map(function(row) {
+      return {
+        id: domesticText_(at(row, 'id')),
+        product_id: pid,
+        asin: domesticText_(at(row, 'asin')),
+        content: domesticText_(at(row, 'content')),
+        created_at: domesticIso_(at(row, 'created_at'))
+      };
+    })
+    .sort(function(a, b) { return String(b.created_at).localeCompare(String(a.created_at)); });
+}
+
+function savePurchaseNote_(input) {
+  input = input || {};
+  const productId = domesticText_(input.product_id);
+  const content = domesticText_(input.content).slice(0, 1000);
+  if (!productId) throw new Error('product_idが必要です。');
+  if (!content) throw new Error('メモの内容を入力してください。');
+  const sheet = getSheetByName_(SHEET_PURCHASE_NOTES, REQUIRED_HEADERS_PURCHASE_NOTES);
+  const headers = getHeaders_(sheet, REQUIRED_HEADERS_PURCHASE_NOTES);
+  const note = {
+    id: Utilities.getUuid(),
+    product_id: productId,
+    asin: domesticText_(input.asin).toUpperCase(),
+    content: content,
+    created_at: new Date().toISOString()
+  };
+  sheet.appendRow(domesticRowValues_(headers, note));
+  return note;
+}

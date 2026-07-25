@@ -24,7 +24,7 @@ const CENTRAL_PROTECTED_GET_ACTIONS_ = new Set([
   'getInboundPlan', 'getRecentTransactionsByAsin', 'getImportStatus', 'getReorderManagementData',
   'getProductCatalog', 'getResearchCommandCenter', 'getProductGrowthData', 'getProductActions',
   'getListingSnapshot', 'getProductMarketHistory', 'getProductMonthlyData', 'getProductConsultations',
-  'getProductConsultation', 'getMasterData'
+  'getProductConsultation', 'getMasterData', 'getPurchaseNotes'
 ]);
 
 const CENTRAL_PROTECTED_POST_ACTIONS_ = new Set([
@@ -32,7 +32,8 @@ const CENTRAL_PROTECTED_POST_ACTIONS_ = new Set([
   'previewAdProductReport', 'syncAdProductReport', 'syncBusinessReport', 'createDomesticOrder',
   'updateDomesticOrder', 'cancelDomesticOrder', 'receiveDomesticOrder', 'saveProductAction',
   'archiveProductAction', 'refreshOwnListingSnapshot', 'refreshProductMarketHistory',
-  'consultProductGrowthMaika', 'sendProductConsultationMessage', 'saveProductContextNote'
+  'consultProductGrowthMaika', 'sendProductConsultationMessage', 'saveProductContextNote',
+  'deleteReorderRecord', 'savePurchaseNote'
 ]);
 // createPageProject/updatePageProject/extractPageInputs/adoptExtractedInputAsSupplier/
 // generatePageDraft/generateRakumartSearchBrief は旧GitHub Pages版(index.html)の
@@ -426,6 +427,10 @@ function doGet(e) {
       return jsonResponse({ status: 'ok', data: getReorderManagementData_() });
     }
 
+    if (action === 'getPurchaseNotes') {
+      return jsonResponse({ status: 'ok', data: getPurchaseNotes_(e.parameter.productId) });
+    }
+
     if (action === 'debugLastInventory') {
       const ss = getSpreadsheet_();
       const sheet = ss.getSheetByName('sku_master');
@@ -710,6 +715,14 @@ function doPost(e) {
     if (action === 'updateReorderRecord') {
       const result = updateReorderRecord(body.recordId, body.reorderData);
       return jsonResponse({ status: 'ok', data: result });
+    }
+
+    if (action === 'deleteReorderRecord') {
+      return jsonResponse({ status: 'ok', data: deleteReorderRecord_(body.recordId) });
+    }
+
+    if (action === 'savePurchaseNote') {
+      return jsonResponse({ status: 'ok', data: savePurchaseNote_(body.input || {}) });
     }
 
     if (action === 'createDomesticOrder') {
