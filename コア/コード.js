@@ -67,7 +67,7 @@ const PRICE_BAND_SIZE = 500;
 
 // 変更後
 const REQUIRED_HEADERS_LIFECYCLE = [
-  'id', 'status', 'category', 'title', 'subtitle', 'parent_asin', 'summary', 'price', 'monthly_sales', 'reviews', 'emoji', 'tags',
+  'id', 'status', 'category', 'title', 'subtitle', 'parent_asin', 'nickname', 'summary', 'price', 'monthly_sales', 'reviews', 'emoji', 'tags',
   'supplier_keywords', 'weakness', 'created_at', 'updated_at',
   'audit', 'produce', 'scores', 'checks', 'image_drive_ids', 'image_drive_id', 'urls',
   'supplier_keywords_json', 'profit', 'cost_simulation', 'page_draft',
@@ -698,6 +698,7 @@ function doPost(e) {
     if (action === 'logPageProjectEvent') return jsonResponse({ status:'ok', data:logPageProjectEventOncePerDay_(body.pageProjectId, body.eventType, body.reason || '', body.payload || {}) });
     if (action === 'saveOwnListingLink') return jsonResponse({ status:'ok', data:saveOwnListingLink_(body.pageProjectId, body.ownListing || {}) });
     if (action === 'connectOwnListing') return jsonResponse({ status:'ok', data:connectOwnListing_(body.cardId, body.ownListing || {}) });
+    if (action === 'setNickname') return jsonResponse({ status:'ok', data:setNickname_(body.cardId, body.nickname) });
     if (action === 'generateRetrospective') return jsonResponse({ status:'ok', data:generateRetrospective_(body.cardId) });
     if (action === 'getLessonsForCandidate') return jsonResponse({ status:'ok', data:getLessonsForCandidate_(body.factPack || {}) });
 
@@ -1065,6 +1066,19 @@ function connectOwnListing_(cardId, input) {
     card.asin = primary || parent || children[0];
     if (!updateCardInLifecycle(card)) throw new Error('カードの更新に失敗しました。');
     if (project && !project.document_status) { project.own_listing = card.own_listing; project.document_status = 'candidate_selected'; updatePageProjectInSheet(project); }
+    return card;
+  } finally { lock.releaseLock(); }
+}
+
+function setNickname_(cardId, nickname) {
+  const lock = LockService.getScriptLock(); lock.waitLock(30000);
+  try {
+    const card = getCardDetail_ProductLifecycle(cardId);
+    if (!card) throw new Error('カードが見つかりません。');
+    const trimmed = String(nickname || '').trim();
+    if (trimmed.length > 40) throw new Error('ニックネームは40文字以内で入力してください。');
+    card.nickname = trimmed;
+    if (!updateCardInLifecycle(card)) throw new Error('カードの更新に失敗しました。');
     return card;
   } finally { lock.releaseLock(); }
 }

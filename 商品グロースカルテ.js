@@ -109,7 +109,7 @@ function getProductCatalog_() {
   const ensure = function(asin) {
     asin = String(asin || '').trim().toUpperCase();
     if (!asin) return null;
-    if (!items[asin]) items[asin] = { asin: asin, parent_asin: '', title: asin, emoji: '📦', skus: [], status: '', is_deleted: false, first_sale_date: '', last_sale_date: '', total_units: 0 };
+    if (!items[asin]) items[asin] = { asin: asin, parent_asin: '', nickname: '', title: asin, emoji: '📦', skus: [], status: '', is_deleted: false, first_sale_date: '', last_sale_date: '', total_units: 0 };
     return items[asin];
   };
 
@@ -122,6 +122,7 @@ function getProductCatalog_() {
       if (!item) return;
       item.product_id = String(row[ix('id')] || '').trim();
       item.parent_asin = ix('parent_asin') >= 0 ? String(row[ix('parent_asin')] || '').trim().toUpperCase() : '';
+      item.nickname = ix('nickname') >= 0 ? String(row[ix('nickname')] || '').trim() : '';
       item.title = String(row[ix('title')] || '').trim() || item.title;
       item.emoji = String(row[ix('emoji')] || '').trim() || item.emoji;
       item.status = ix('status') >= 0 ? String(row[ix('status')] || '').trim() : '';
