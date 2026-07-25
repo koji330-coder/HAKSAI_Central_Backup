@@ -33,7 +33,7 @@ const CENTRAL_PROTECTED_POST_ACTIONS_ = new Set([
   'updateDomesticOrder', 'cancelDomesticOrder', 'receiveDomesticOrder', 'saveProductAction',
   'archiveProductAction', 'refreshOwnListingSnapshot', 'refreshProductMarketHistory',
   'consultProductGrowthMaika', 'sendProductConsultationMessage', 'saveProductContextNote',
-  'deleteReorderRecord', 'savePurchaseNote'
+  'deleteReorderRecord', 'savePurchaseNote', 'updateReorderOrderDate'
 ]);
 // createPageProject/updatePageProject/extractPageInputs/adoptExtractedInputAsSupplier/
 // generatePageDraft/generateRakumartSearchBrief は旧GitHub Pages版(index.html)の
@@ -719,6 +719,10 @@ function doPost(e) {
 
     if (action === 'deleteReorderRecord') {
       return jsonResponse({ status: 'ok', data: deleteReorderRecord_(body.recordId) });
+    }
+
+    if (action === 'updateReorderOrderDate') {
+      return jsonResponse({ status: 'ok', data: updateReorderOrderDate_(body.recordId, body.orderDate) });
     }
 
     if (action === 'savePurchaseNote') {

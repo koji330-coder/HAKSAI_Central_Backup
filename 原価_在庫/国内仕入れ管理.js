@@ -412,6 +412,39 @@ function receiveDomesticOrder_(id, actualArrivalDate) {
   }
 }
 
+// 削除/日付修正のあと、その商品に残っている履歴のうち最新入荷日のものを
+// 現在原価として再設定する。残りが無ければcurrent_landed_costには触れない
+// (空にすると粗利計算に影響するため)。
+function recomputeCurrentLandedCostForProduct_(sheet, productId) {
+  if (!productId) return;
+  const remaining = sheet.getDataRange().getValues();
+  if (remaining.length <= 1) return;
+  const headers = remaining[0].map(function(value) { return domesticText_(value); });
+  const pidIndex = headers.indexOf('product_id');
+  const dateIndex = headers.indexOf('order_date');
+  const costIndex = headers.indexOf('landed_cost_actual');
+  let latest = null;
+  for (let i = 1; i < remaining.length; i++) {
+    if (domesticText_(remaining[i][pidIndex]) !== productId) continue;
+    const date = domesticDate_(remaining[i][dateIndex]);
+    const cost = domesticNumber_(remaining[i][costIndex]);
+    if (!latest || date > latest.date) latest = { date: date, cost: cost };
+  }
+  if (latest && latest.cost > 0) updateProductCurrentLandedCost(productId, latest.cost);
+}
+
+function findReorderRowById_(sheet, id) {
+  const values = sheet.getDataRange().getValues();
+  const headers = values[0].map(function(value) { return domesticText_(value); });
+  const idIndex = headers.indexOf('id');
+  const pidIndex = headers.indexOf('product_id');
+  for (let i = 1; i < values.length; i++) {
+    if (domesticText_(values[i][idIndex]) !== id) continue;
+    return { rowNumber: i + 1, headers: headers, productId: domesticText_(values[i][pidIndex]) };
+  }
+  return null;
+}
+
 // 発注・原価履歴タブの「重複候補チェック」「商品別タイムライン」から、
 // 誤って重複登録された行や、ツール完成前の手入力データを削除するために使う。
 // reorder_historyは基本ログとして追記式で扱ってきたが、データクレンジング用途として
@@ -423,41 +456,34 @@ function deleteReorderRecord_(recordId) {
   lock.waitLock(30000);
   try {
     const sheet = getSheetByName_(SHEET_REORDER_HISTORY, REQUIRED_HEADERS_REORDER);
-    const values = sheet.getDataRange().getValues();
-    const headers = values[0].map(function(value) { return domesticText_(value); });
-    const idIndex = headers.indexOf('id');
-    const pidIndex = headers.indexOf('product_id');
-    let targetRow = -1;
-    let productId = '';
-    for (let i = 1; i < values.length; i++) {
-      if (domesticText_(values[i][idIndex]) !== id) continue;
-      targetRow = i + 1;
-      productId = domesticText_(values[i][pidIndex]);
-      break;
-    }
-    if (targetRow < 0) throw new Error('発注履歴が見つかりません: ' + id);
-    sheet.deleteRow(targetRow);
-
-    // 削除後、その商品に残っている履歴のうち最新入荷日のものを現在原価として再設定する。
-    // 残りが無ければcurrent_landed_costには触れない(空にすると粗利計算に影響するため)。
-    if (productId) {
-      const remaining = sheet.getDataRange().getValues();
-      if (remaining.length > 1) {
-        const rHeaders = remaining[0].map(function(value) { return domesticText_(value); });
-        const rPidIndex = rHeaders.indexOf('product_id');
-        const rDateIndex = rHeaders.indexOf('order_date');
-        const rCostIndex = rHeaders.indexOf('landed_cost_actual');
-        let latest = null;
-        for (let i = 1; i < remaining.length; i++) {
-          if (domesticText_(remaining[i][rPidIndex]) !== productId) continue;
-          const date = domesticDate_(remaining[i][rDateIndex]);
-          const cost = domesticNumber_(remaining[i][rCostIndex]);
-          if (!latest || date > latest.date) latest = { date: date, cost: cost };
-        }
-        if (latest && latest.cost > 0) updateProductCurrentLandedCost(productId, latest.cost);
-      }
-    }
+    const found = findReorderRowById_(sheet, id);
+    if (!found) throw new Error('発注履歴が見つかりません: ' + id);
+    sheet.deleteRow(found.rowNumber);
+    recomputeCurrentLandedCostForProduct_(sheet, found.productId);
     return { status: 'ok', id: id };
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+// 商品別タイムラインから入荷日だけを修正するための軽量な更新。
+// 請求書なしで着地原価を計算した場合など、正確な入荷日が分からず処理日で
+// 仮登録されることがあるための救済(着地原価計算ツール側の対応と対)。
+function updateReorderOrderDate_(recordId, orderDate) {
+  const id = domesticText_(recordId);
+  const date = domesticDate_(orderDate);
+  if (!id) throw new Error('recordIdが必要です。');
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) throw new Error('入荷日をYYYY-MM-DD形式で入力してください。');
+  const lock = LockService.getScriptLock();
+  lock.waitLock(30000);
+  try {
+    const sheet = getSheetByName_(SHEET_REORDER_HISTORY, REQUIRED_HEADERS_REORDER);
+    const found = findReorderRowById_(sheet, id);
+    if (!found) throw new Error('発注履歴が見つかりません: ' + id);
+    const dateIndex = found.headers.indexOf('order_date');
+    sheet.getRange(found.rowNumber, dateIndex + 1).setValue(date);
+    recomputeCurrentLandedCostForProduct_(sheet, found.productId);
+    return { status: 'ok', id: id, order_date: date };
   } finally {
     lock.releaseLock();
   }
