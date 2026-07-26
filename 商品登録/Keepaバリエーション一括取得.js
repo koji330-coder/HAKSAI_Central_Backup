@@ -93,26 +93,10 @@ function runKeepaOwnListingBackfill() {
       }
       processed++;
 
-      const siblingAsins = (snap.variations || [])
-        .map(v => String((v && v.asin) || '').trim().toUpperCase())
-        .filter(a => a && asinToId[a]); // 自社product_lifecycleに行があるものだけ対象にする
-
-      const groupAsins = Array.from(new Set([asin, ...siblingAsins])).filter(a => asinToId[a]);
-
-      if (groupAsins.length >= 2) {
-        const key = groupAsins.slice().sort()[0];
-        groupAsins.forEach(a => {
-          const current = asinToCurrentParent[a] || '';
-          if (current === key) return; // 既に同じ値
-          if (current) { skippedAlreadySet++; return; } // 別の値が既に設定済みなら触らない
-          const card = getCardDetail_ProductLifecycle(asinToId[a]);
-          if (!card) { skippedNoRow++; return; }
-          card.parent_asin = key;
-          updateCardInLifecycle(card);
-          asinToCurrentParent[a] = key; // 同一実行内での重複書き込みを防ぐ
-        });
-        linkedGroups++;
-      }
+      const linkResult = linkParentAsinGroup_(asin, snap.variations, asinToId, asinToCurrentParent);
+      if (linkResult.groupAsins.length >= 2) linkedGroups++;
+      skippedNoRow += linkResult.skippedNoRow;
+      skippedAlreadySet += linkResult.skippedAlreadySet;
 
       const tokensLeft = Number(snap.keepa_tokens_left) || 0;
       if (tokensLeft < KEEPA_BACKFILL_TOKEN_SAFETY_MARGIN) {
@@ -129,6 +113,67 @@ function runKeepaOwnListingBackfill() {
   } finally {
     lock.releaseLock();
   }
+}
+
+/**
+ * Keepaのvariations + 自社product_lifecycleの行有無から、バリエーショングループを組み、
+ * ASIN昇順の先頭を共有キーとしてparent_asinに書き込む(未設定のものだけ)。
+ * バッチ処理・単発リフレッシュの両方から呼ばれる共有ロジック。
+ */
+function linkParentAsinGroup_(asin, variations, asinToId, asinToCurrentParent) {
+  const siblingAsins = (variations || [])
+    .map(v => String((v && v.asin) || '').trim().toUpperCase())
+    .filter(a => a && asinToId[a]); // 自社product_lifecycleに行があるものだけ対象にする
+
+  const groupAsins = Array.from(new Set([asin, ...siblingAsins])).filter(a => asinToId[a]);
+
+  let skippedAlreadySet = 0, skippedNoRow = 0;
+
+  if (groupAsins.length >= 2) {
+    const key = groupAsins.slice().sort()[0];
+    groupAsins.forEach(a => {
+      const current = asinToCurrentParent[a] || '';
+      if (current === key) return; // 既に同じ値
+      if (current) { skippedAlreadySet++; return; } // 別の値が既に設定済みなら触らない
+      const card = getCardDetail_ProductLifecycle(asinToId[a]);
+      if (!card) { skippedNoRow++; return; }
+      card.parent_asin = key;
+      updateCardInLifecycle(card);
+      asinToCurrentParent[a] = key; // 同一実行内での重複書き込みを防ぐ
+    });
+  }
+
+  return { groupAsins, skippedAlreadySet, skippedNoRow };
+}
+
+/**
+ * 商品マスタから、1商品分だけKeepaを再取得してバリエーショングループを更新する。
+ * 将来カラー・サイズが追加された時に、この商品だけピンポイントで更新できる。
+ */
+function refreshProductVariationLink_(asinValue) {
+  const asin = pgAsin_(asinValue);
+  const snap = refreshOwnListingSnapshot_(asin);
+
+  const lifecycle = getSheetByName_(SHEET_PRODUCT_LIFECYCLE, REQUIRED_HEADERS_LIFECYCLE);
+  const lv = lifecycle.getDataRange().getValues();
+  const lh = lv[0];
+  const ixAsin = lh.indexOf('asin'), ixId = lh.indexOf('id'), ixParent = lh.indexOf('parent_asin');
+  const asinToId = {}, asinToCurrentParent = {};
+  for (let i = 1; i < lv.length; i++) {
+    const a = String(lv[i][ixAsin] || '').trim().toUpperCase();
+    if (!a) continue;
+    asinToId[a] = String(lv[i][ixId] || '').trim();
+    asinToCurrentParent[a] = String(lv[i][ixParent] || '').trim();
+  }
+
+  const result = linkParentAsinGroup_(asin, snap.variations, asinToId, asinToCurrentParent);
+  return {
+    asin,
+    parent_asin: asinToCurrentParent[asin] || '',
+    variation_count: result.groupAsins.length,
+    skipped_already_set: result.skippedAlreadySet,
+    skipped_no_lifecycle_row: result.skippedNoRow
+  };
 }
 
 function appendKeepaBackfillLog_(row) {

@@ -699,6 +699,7 @@ function doPost(e) {
     if (action === 'saveOwnListingLink') return jsonResponse({ status:'ok', data:saveOwnListingLink_(body.pageProjectId, body.ownListing || {}) });
     if (action === 'connectOwnListing') return jsonResponse({ status:'ok', data:connectOwnListing_(body.cardId, body.ownListing || {}) });
     if (action === 'setNickname') return jsonResponse({ status:'ok', data:setNickname_(body.cardId, body.nickname) });
+    if (action === 'refreshProductVariationLink') return jsonResponse({ status:'ok', data:refreshProductVariationLink_(body.asin) });
     if (action === 'generateRetrospective') return jsonResponse({ status:'ok', data:generateRetrospective_(body.cardId) });
     if (action === 'getLessonsForCandidate') return jsonResponse({ status:'ok', data:getLessonsForCandidate_(body.factPack || {}) });
 
