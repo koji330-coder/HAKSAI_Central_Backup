@@ -11,7 +11,7 @@ const PG_AD_ACTION_CONTEXT_SHEET = 'advertising_action_contexts';
 const PG_AD_ACTION_CONTEXT_HEADERS = [
   'context_id','action_id','asin','analysis_session_id','candidate_ids_json',
   'execution_detail_mode','before_snapshot_file_id','after_snapshot_file_id',
-  'evaluation_status','created_at','updated_at'
+  'evaluation_status','comparison_json','created_at','updated_at'
 ];
 const PG_SNAPSHOT_HEADERS = [
   'snapshot_id','page_project_id','own_asin','captured_at','checked_at','source','content_hash',
@@ -64,7 +64,9 @@ function pgHydrateAdvertisingActionContext_(headers, row) {
   headers.forEach(function(h, i) { obj[h] = row[i]; });
   obj.candidate_ids = pgParseJson_(obj.candidate_ids_json, []);
   obj.selected_candidate_count = obj.candidate_ids.length;
+  obj.comparison = pgParseJson_(obj.comparison_json, null);
   delete obj.candidate_ids_json;
+  delete obj.comparison_json;
   return obj;
 }
 
@@ -429,6 +431,41 @@ function pgAdvertisingMetricSnapshot_(report) {
   };
 }
 
+function pgCentralAdvertisingPeriodSnapshot_(asin, fromDate, toDate, captureMode) {
+  const from = pgDateKey_(fromDate), to = pgDateKey_(toDate);
+  if (!from || !to || from > to) return null;
+  const start = new Date(from + 'T00:00:00+09:00');
+  const end = new Date(to + 'T00:00:00+09:00');
+  const days = Math.max(1, Math.round((end.getTime() - start.getTime()) / 86400000) + 1);
+  const growth = getProductGrowthData_(asin, Math.min(365, Math.max(7, days)), to);
+  const totals = growth.points.filter(function(point) {
+    return point.date >= from && point.date <= to;
+  }).reduce(function(sum, point) {
+    [
+      'sales','units','gross_profit','ad_spend','ad_sales',
+      'ad_impressions','ad_clicks','ad_orders','ad_units'
+    ].forEach(function(key) { sum[key] += Number(point[key]) || 0; });
+    return sum;
+  }, {
+    sales:0,units:0,gross_profit:0,ad_spend:0,ad_sales:0,
+    ad_impressions:0,ad_clicks:0,ad_orders:0,ad_units:0
+  });
+  totals.profit_after_ad = totals.gross_profit - totals.ad_spend;
+  totals.acos = totals.ad_sales > 0 ? totals.ad_spend / totals.ad_sales : null;
+  totals.roas = totals.ad_spend > 0 ? totals.ad_sales / totals.ad_spend : null;
+  totals.cpc_yen = totals.ad_clicks > 0 ? totals.ad_spend / totals.ad_clicks : null;
+  totals.ad_cvr = totals.ad_clicks > 0 ? totals.ad_orders / totals.ad_clicks : null;
+  totals.tacos = totals.sales > 0 ? totals.ad_spend / totals.sales : null;
+  return {
+    source: 'CENTRAL_DAILY_ASIN',
+    capture_mode: captureMode || 'CAPTURED_WITH_SNAPSHOT',
+    period_from: from,
+    period_to: to,
+    day_count: days,
+    totals: totals
+  };
+}
+
 function pgAllAdvertisingCandidates_(session) {
   const out = [];
   const seen = {};
@@ -514,6 +551,12 @@ function saveAdvertisingAdjustmentAction_(input, images, contextInput) {
       target_rows: pgAdvertisingMetricSnapshot_(session.preview.reports.target),
       search_term_rows: pgAdvertisingMetricSnapshot_(session.preview.reports.search_term)
     },
+    central_period: pgCentralAdvertisingPeriodSnapshot_(
+      asin,
+      session.preview.metadata.period_from,
+      session.preview.metadata.period_to,
+      'CAPTURED_WITH_BEFORE_SNAPSHOT'
+    ),
     central_context: session.analysis.central_context || null
   };
   let snapshotFile = null;
@@ -539,6 +582,7 @@ function saveAdvertisingAdjustmentAction_(input, images, contextInput) {
       before_snapshot_file_id: snapshotFile.getId(),
       after_snapshot_file_id: '',
       evaluation_status: 'WAITING_FOR_AFTER',
+      comparison_json: '',
       created_at: now,
       updated_at: now
     };
@@ -553,6 +597,181 @@ function saveAdvertisingAdjustmentAction_(input, images, contextInput) {
   } catch (error) {
     if (snapshotFile && typeof snapshotFile.setTrashed === 'function') {
       try { snapshotFile.setTrashed(true); } catch (cleanupError) { Logger.log(cleanupError.message); }
+    }
+    throw error;
+  }
+}
+
+function pgFindAdvertisingActionContext_(actionId) {
+  const id = String(actionId || '').trim();
+  if (!id) throw new Error('actionIdが必要です。');
+  const ref = pgEnsureSheet_(PG_AD_ACTION_CONTEXT_SHEET, PG_AD_ACTION_CONTEXT_HEADERS);
+  const values = ref.sheet.getDataRange().getValues();
+  const actionIndex = ref.headers.indexOf('action_id');
+  for (let i = 1; i < values.length; i++) {
+    if (String(values[i][actionIndex] || '').trim() !== id) continue;
+    return {
+      ref: ref,
+      row_number: i + 1,
+      context: pgHydrateAdvertisingActionContext_(ref.headers, values[i])
+    };
+  }
+  throw new Error('広告調整アクションのcontextが見つかりません。');
+}
+
+function pgReadAdvertisingSnapshotFile_(fileId) {
+  try {
+    return JSON.parse(DriveApp.getFileById(String(fileId || '')).getBlob().getDataAsString('UTF-8'));
+  } catch (error) {
+    throw new Error('広告調整snapshotを読み込めません: ' + error.message);
+  }
+}
+
+function pgAdvertisingEvaluationWarnings_(beforeSnapshot, afterSession) {
+  const warnings = [];
+  const beforeFrom = String(beforeSnapshot.advertising_period.from || '');
+  const beforeTo = String(beforeSnapshot.advertising_period.to || '');
+  const afterFrom = String(afterSession.preview.metadata.period_from || '');
+  const afterTo = String(afterSession.preview.metadata.period_to || '');
+  if (afterFrom <= beforeTo) warnings.push({
+    code: 'PERIOD_OVERLAP',
+    message: '変更前期間と変更後期間が重なっています。重複期間の影響を含む比較です。'
+  });
+  const days = function(from, to) {
+    return Math.round((new Date(to + 'T00:00:00+09:00').getTime()
+      - new Date(from + 'T00:00:00+09:00').getTime()) / 86400000) + 1;
+  };
+  if (days(beforeFrom, beforeTo) !== days(afterFrom, afterTo)) warnings.push({
+    code: 'UNEQUAL_PERIOD_LENGTH',
+    message: '変更前後の期間日数が異なります。合計値は日数差の影響を受けます。'
+  });
+  const beforeSource = beforeSnapshot.source || {};
+  const afterMeta = afterSession.preview.metadata || {};
+  if (beforeSource.target_file_sha256 && beforeSource.target_file_sha256 === afterMeta.target_file_sha256) warnings.push({
+    code: 'SAME_TARGET_FILE',
+    message: 'Target CSVが変更前snapshotと同一です。'
+  });
+  if (beforeSource.search_term_file_sha256
+    && beforeSource.search_term_file_sha256 === afterMeta.search_term_file_sha256) warnings.push({
+    code: 'SAME_SEARCH_TERM_FILE',
+    message: 'Search Term CSVが変更前snapshotと同一です。'
+  });
+  return warnings;
+}
+
+function attachAdvertisingActionAfterSnapshot_(actionId, afterSessionId) {
+  const found = pgFindAdvertisingActionContext_(actionId);
+  const context = found.context;
+  if (context.after_snapshot_file_id) throw new Error('このアクションには変更後snapshotが既に登録されています。');
+  const sessionId = String(afterSessionId || '').trim();
+  if (!sessionId) throw new Error('変更後の広告分析sessionが必要です。');
+  if (sessionId === String(context.analysis_session_id || '')) {
+    throw new Error('変更前と同じ広告分析sessionは変更後snapshotに登録できません。');
+  }
+  const afterSession = getAdvertisingKeywordAnalysis_(sessionId);
+  if (String(afterSession.preview.metadata.asin || '').trim().toUpperCase()
+    !== String(context.asin || '').trim().toUpperCase()) {
+    throw new Error('変更後sessionと広告調整アクションのASINが一致しません。');
+  }
+  const beforeSnapshot = pgReadAdvertisingSnapshotFile_(context.before_snapshot_file_id);
+  const beforeTo = String(beforeSnapshot.advertising_period.to || '');
+  const afterTo = String(afterSession.preview.metadata.period_to || '');
+  if (!afterTo || afterTo <= beforeTo) {
+    throw new Error('変更後期間は変更前期間より後の日付を含む必要があります。対象期間を確認してください。');
+  }
+  const beforeSource = beforeSnapshot.source || {};
+  const afterMeta = afterSession.preview.metadata || {};
+  const hasCommonReport = Boolean(
+    (beforeSource.target_file_sha256 && afterMeta.target_file_sha256)
+    || (beforeSource.search_term_file_sha256 && afterMeta.search_term_file_sha256)
+  );
+  if (!hasCommonReport) {
+    throw new Error('変更前後で共通するCSV種別がありません。同じ種類のTargetまたはSearch Term CSVを選択してください。');
+  }
+  const identicalSources = [];
+  if (beforeSource.target_file_sha256 && afterMeta.target_file_sha256) {
+    identicalSources.push(beforeSource.target_file_sha256 === afterMeta.target_file_sha256);
+  }
+  if (beforeSource.search_term_file_sha256 && afterMeta.search_term_file_sha256) {
+    identicalSources.push(beforeSource.search_term_file_sha256 === afterMeta.search_term_file_sha256);
+  }
+  if (identicalSources.length && identicalSources.every(Boolean)) {
+    throw new Error('変更前と完全に同じ広告CSVです。新しい期間のCSVを選択してください。');
+  }
+  const afterCentral = pgCentralAdvertisingPeriodSnapshot_(
+    context.asin,
+    afterSession.preview.metadata.period_from,
+    afterSession.preview.metadata.period_to,
+    'CAPTURED_WITH_AFTER_SNAPSHOT'
+  );
+  const beforeCentral = beforeSnapshot.central_period || pgCentralAdvertisingPeriodSnapshot_(
+    context.asin,
+    beforeSnapshot.advertising_period.from,
+    beforeSnapshot.advertising_period.to,
+    'RECONSTRUCTED_AT_AFTER_LINK'
+  );
+  const warnings = pgAdvertisingEvaluationWarnings_(beforeSnapshot, afterSession);
+  if (!beforeSnapshot.central_period) warnings.push({
+    code: 'CENTRAL_BEFORE_RECONSTRUCTED',
+    message: '変更前のCentral日次実績は、変更後snapshot接続時点の保存データから再集計しています。'
+  });
+  const now = new Date().toISOString();
+  const comparison = {
+    schema_version: 'advertising_action_comparison_v1',
+    action_id: String(actionId),
+    asin: String(context.asin),
+    joined_at: now,
+    interpretation_scope: 'BUNDLED_ADJUSTMENT_BEFORE_AFTER_NOT_SINGLE_KEYWORD_CAUSALITY',
+    warning: '複数の広告変更をまとめた前後比較です。個別キーワードの因果効果は断定しません。',
+    warnings: warnings,
+    before: {
+      analysis_session_id: String(context.analysis_session_id),
+      period_from: beforeSnapshot.advertising_period.from,
+      period_to: beforeSnapshot.advertising_period.to,
+      advertising_efficiency: beforeSnapshot.advertising_efficiency,
+      central_period: beforeCentral
+    },
+    after: {
+      analysis_session_id: afterSession.session_id,
+      period_from: afterSession.preview.metadata.period_from,
+      period_to: afterSession.preview.metadata.period_to,
+      advertising_efficiency: {
+        warning: 'CSVの返却行だけを集計した変更後snapshot。広告アカウント・キャンペーン全体とは限らない。',
+        target_rows: pgAdvertisingMetricSnapshot_(afterSession.preview.reports.target),
+        search_term_rows: pgAdvertisingMetricSnapshot_(afterSession.preview.reports.search_term)
+      },
+      central_period: afterCentral
+    }
+  };
+  let afterFile = null;
+  try {
+    afterFile = pgAdvertisingSnapshotFolder_(String(actionId)).createFile(Utilities.newBlob(
+      JSON.stringify({
+        schema_version: 'advertising_action_after_snapshot_v1',
+        snapshot_role: 'AFTER',
+        captured_at: now,
+        action_id: String(actionId),
+        asin: String(context.asin),
+        analysis_session_id: afterSession.session_id,
+        source_analysis_result_file_id: afterSession.result_drive_file_id || null,
+        comparison: comparison
+      }),
+      'application/json',
+      'after_snapshot.json'
+    ));
+    const col = {};
+    found.ref.headers.forEach(function(header, index) { col[header] = index + 1; });
+    found.ref.sheet.getRange(found.row_number, col.after_snapshot_file_id).setValue(afterFile.getId());
+    found.ref.sheet.getRange(found.row_number, col.evaluation_status).setValue('READY');
+    found.ref.sheet.getRange(found.row_number, col.comparison_json).setValue(JSON.stringify(comparison));
+    found.ref.sheet.getRange(found.row_number, col.updated_at).setValue(now);
+    const updatedRow = found.ref.sheet.getRange(
+      found.row_number, 1, 1, found.ref.headers.length
+    ).getValues()[0];
+    return pgHydrateAdvertisingActionContext_(found.ref.headers, updatedRow);
+  } catch (error) {
+    if (afterFile && typeof afterFile.setTrashed === 'function') {
+      try { afterFile.setTrashed(true); } catch (cleanupError) { Logger.log(cleanupError.message); }
     }
     throw error;
   }

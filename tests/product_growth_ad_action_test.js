@@ -4,9 +4,11 @@ const path = require('path');
 const vm = require('vm');
 
 let sequence = 0;
+const files = new Map();
 class FakeFile {
-  constructor(blob) { this.id = `FILE-${++sequence}`; this.blob = blob; this.trashed = false; }
+  constructor(blob) { this.id = `FILE-${++sequence}`; this.blob = blob; this.trashed = false; files.set(this.id, this); }
   getId() { return this.id; }
+  getBlob() { return { getDataAsString: () => String(this.blob.value || '') }; }
   setTrashed(value) { this.trashed = Boolean(value); }
 }
 class FakeIterator {
@@ -26,8 +28,30 @@ const appended = [];
 const headers = [
   'context_id','action_id','asin','analysis_session_id','candidate_ids_json',
   'execution_detail_mode','before_snapshot_file_id','after_snapshot_file_id',
-  'evaluation_status','created_at','updated_at'
+  'evaluation_status','comparison_json','created_at','updated_at'
 ];
+class FakeRange {
+  constructor(sheet, row, column, numRows = 1, numCols = 1) {
+    this.sheet=sheet;this.row=row;this.column=column;this.numRows=numRows;this.numCols=numCols;
+  }
+  getValues() {
+    return Array.from({length:this.numRows},(_,r)=>Array.from({length:this.numCols},(_,c)=>
+      this.sheet.rows[this.row-1+r]?.[this.column-1+c] ?? ''
+    ));
+  }
+  setValue(value) {
+    while(this.sheet.rows.length<this.row)this.sheet.rows.push([]);
+    this.sheet.rows[this.row-1][this.column-1]=value;
+    return this;
+  }
+}
+class FakeSheet {
+  constructor() { this.rows=[headers.slice()]; }
+  appendRow(row) { this.rows.push(row.slice()); appended.push(row); }
+  getDataRange() { return new FakeRange(this,1,1,this.rows.length,headers.length); }
+  getRange(row,column,numRows=1,numCols=1) { return new FakeRange(this,row,column,numRows,numCols); }
+}
+const contextSheet = new FakeSheet();
 const candidate = {
   candidate_id: 'CAND-1',
   family: 'NEW_EXACT',
@@ -71,6 +95,15 @@ const session = {
     central_context: { period_key:'2026-07' }
   }
 };
+const afterSession = JSON.parse(JSON.stringify(session));
+afterSession.session_id='AKA-2';
+afterSession.preview.metadata.period_from='2026-07-28';
+afterSession.preview.metadata.period_to='2026-08-23';
+afterSession.preview.metadata.target_file_sha256='target-sha-after';
+afterSession.preview.metadata.search_term_file_sha256='search-sha-after';
+afterSession.preview.reports.target.rows=[
+  { impressions:200, clicks:20, spend_yen:220, orders:5, sales_yen:2200 }
+];
 
 const context = {
   console,
@@ -80,7 +113,7 @@ const context = {
   Math,
   isFinite,
   DRIVE_FOLDER_ID: 'ROOT',
-  DriveApp: { getFolderById: () => root },
+  DriveApp: { getFolderById: () => root, getFileById: id => files.get(String(id)) },
   Utilities: {
     getUuid: () => `UUID-${++sequence}`,
     newBlob: (value, contentType, name) => ({ value, contentType, name })
@@ -94,11 +127,13 @@ vm.runInContext(
 );
 
 context.pgAsin_ = value => String(value).trim().toUpperCase();
-context.getAdvertisingKeywordAnalysis_ = () => session;
+context.pgDateKey_ = value => String(value || '').slice(0,10);
+context.getProductGrowthData_ = () => ({ points:[] });
+context.getAdvertisingKeywordAnalysis_ = id => id === 'AKA-2' ? afterSession : session;
 context.saveProductAction_ = input => ({ ...input, attachments:[] });
 context.pgEnsureSheet_ = () => ({
   headers,
-  sheet: { appendRow: row => appended.push(row) }
+  sheet: contextSheet
 });
 
 const metrics = context.pgAdvertisingMetricSnapshot_(session.preview.reports.target);
@@ -131,6 +166,20 @@ assert.equal(saved.advertising_context.analysis_session_id, 'AKA-1');
 assert.deepEqual(Array.from(saved.advertising_context.candidate_ids), ['CAND-1']);
 assert.equal(saved.advertising_context.evaluation_status, 'WAITING_FOR_AFTER');
 assert.equal(appended.length, 1);
+
+const attached = context.attachAdvertisingActionAfterSnapshot_(
+  saved.action_id,
+  'AKA-2'
+);
+assert.equal(attached.evaluation_status, 'READY');
+assert.ok(attached.after_snapshot_file_id);
+assert.equal(attached.comparison.before.advertising_efficiency.target_rows.totals.clicks, 15);
+assert.equal(attached.comparison.after.advertising_efficiency.target_rows.totals.clicks, 20);
+assert.equal(attached.comparison.interpretation_scope, 'BUNDLED_ADJUSTMENT_BEFORE_AFTER_NOT_SINGLE_KEYWORD_CAUSALITY');
+assert.throws(
+  () => context.attachAdvertisingActionAfterSnapshot_(saved.action_id, 'AKA-2'),
+  /既に登録/
+);
 
 assert.throws(() => context.saveAdvertisingAdjustmentAction_({
   asin:'B0FXTQPGSB',

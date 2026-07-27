@@ -35,6 +35,7 @@ const CENTRAL_PROTECTED_POST_ACTIONS_ = new Set([
   'previewAdProductReport', 'syncAdProductReport', 'syncBusinessReport',
   'previewSearchQueryPerformance', 'syncSearchQueryPerformance', 'createDomesticOrder',
   'previewAdvertisingKeywordAnalysis', 'runAdvertisingKeywordAnalysis',
+  'attachAdvertisingActionAfterSnapshot',
   'updateDomesticOrder', 'cancelDomesticOrder', 'receiveDomesticOrder', 'saveProductAction',
   'archiveProductAction', 'refreshOwnListingSnapshot', 'refreshProductMarketHistory',
   'consultProductGrowthMaika', 'sendProductConsultationMessage', 'saveProductContextNote',
@@ -827,6 +828,15 @@ function doPost(e) {
         data: body.advertisingContext
           ? saveAdvertisingAdjustmentAction_(body.item || {}, body.images || [], body.advertisingContext)
           : saveProductAction_(body.item || {}, body.images || [])
+      });
+    }
+    if (action === 'attachAdvertisingActionAfterSnapshot') {
+      return jsonResponse({
+        status: 'ok',
+        data: attachAdvertisingActionAfterSnapshot_(
+          body.actionId || '',
+          body.analysisSessionId || ''
+        )
       });
     }
     if (action === 'archiveProductAction') {
