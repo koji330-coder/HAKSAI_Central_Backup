@@ -13,11 +13,11 @@ const AKA_SESSION_HEADERS_ = [
   'policy_version', 'parser_version', 'result_drive_file_id',
   'created_by', 'created_at', 'updated_at'
 ];
-const AKA_PARSER_VERSION_ = 'advertising_console_csv_v1';
+const AKA_PARSER_VERSION_ = 'advertising_console_csv_v2';
 const AKA_PREVIEW_SCHEMA_VERSION_ = 'advertising_keyword_analysis_preview_v1';
 const AKA_SESSION_SCHEMA_VERSION_ = 'advertising_keyword_analysis_session_v1';
 const AKA_ANALYSIS_SCHEMA_VERSION_ = 'advertising_keyword_analysis_v1';
-const AKA_POLICY_VERSION_ = 'advertising_keyword_decision_v0';
+const AKA_POLICY_VERSION_ = 'advertising_keyword_decision_v1';
 const AKA_MAX_FILE_BYTES_ = 5 * 1024 * 1024;
 const AKA_ROAS_TOLERANCE_ = 0.000001;
 const AKA_POLICY_ = {
@@ -27,7 +27,7 @@ const AKA_POLICY_ = {
   family_selection_limits: {
     EXISTING_BID: 5,
     NEW_EXACT: 3,
-    NEGATIVE_REVIEW: 0,
+    NEGATIVE_REVIEW: 2,
     MAINTAIN: 3,
     DATA_QUALITY: 5
   },
@@ -38,7 +38,10 @@ const AKA_POLICY_ = {
   numeric_bid_role: 'USER_ADJUSTABLE_REFERENCE',
   inventory_caution_suppresses_direction: false,
   search_market_reference_rule: 'LATEST_AVAILABLE_ON_OR_BEFORE_AD_PERIOD',
-  click_metrics_required_for_negative: true
+  click_metrics_required_for_negative: true,
+  click_metric_basis: 'RAW_COUNTS_RECOMPUTED_RATES',
+  zero_order_click_lower_min: 8,
+  negative_review_click_min: 8
 };
 
 const AKA_TARGET_COLUMNS_ = [
@@ -70,6 +73,23 @@ const AKA_SEARCH_TERM_COLUMNS_ = [
   ['orders', '商品購入数', ['商品購入数', 'Orders']],
   ['sales', '売上 (JPY)', ['売上 (JPY)', 'Sales (JPY)']],
   ['roas', 'ROAS', ['ROAS']]
+];
+
+const AKA_TARGET_OPTIONAL_COLUMNS_ = [
+  ['clicks', 'クリック数', ['クリック数', 'Clicks']],
+  ['ctr', 'CTR', ['CTR']],
+  ['cpc', 'CPC (JPY)', ['CPC (JPY)', 'CPC']],
+  ['acos', 'ACOS', ['ACOS']],
+  ['conversion_rate', '購入率', ['購入率', 'Conversion rate']]
+];
+
+const AKA_SEARCH_TERM_OPTIONAL_COLUMNS_ = [
+  ['impressions', 'インプレッション', ['インプレッション', 'Impressions']],
+  ['clicks', 'クリック数', ['クリック数', 'Clicks']],
+  ['ctr', 'CTR', ['CTR']],
+  ['cpc', 'CPC (JPY)', ['CPC (JPY)', 'CPC']],
+  ['acos', 'ACOS', ['ACOS']],
+  ['conversion_rate', '購入率', ['購入率', 'Conversion rate']]
 ];
 
 function akaIssue_(code, message, details) {
@@ -140,12 +160,14 @@ function akaParseCsv_(text) {
   return records;
 }
 
-function akaResolveColumns_(headers, definitions, allowMissing) {
+function akaResolveColumns_(headers, definitions, allowMissing, optionalDefinitions) {
   const normalizedHeaders = headers.map(akaNormalizeHeader_);
   const columns = {};
   const used = {};
   const missing = [];
-  definitions.forEach(function(definition) {
+  const requiredKeys = {};
+  definitions.forEach(function(definition) { requiredKeys[definition[0]] = true; });
+  definitions.concat(optionalDefinitions || []).forEach(function(definition) {
     const aliases = {};
     definition[2].forEach(function(alias) { aliases[akaNormalizeHeader_(alias)] = true; });
     const matches = [];
@@ -154,8 +176,11 @@ function akaResolveColumns_(headers, definitions, allowMissing) {
     });
     if (matches.length > 1) throw new Error('列「' + definition[1] + '」に一致するヘッダーが複数あります。');
     columns[definition[0]] = matches.length ? matches[0] : -1;
-    if (!matches.length) missing.push(definition[1]);
-    else used[matches[0]] = true;
+    if (!matches.length) {
+      if (requiredKeys[definition[0]]) missing.push(definition[1]);
+    } else {
+      used[matches[0]] = true;
+    }
   });
   if (missing.length && !allowMissing) throw new Error('必要な列がありません: ' + missing.join('、'));
   const unknown = headers.filter(function(value, index) {
@@ -197,6 +222,19 @@ function akaNumber_(raw, label, rowNumber, integer) {
   const normalized = String(raw).trim().replace(/[¥￥,%\s]/g, '');
   const value = Number(normalized);
   if (!isFinite(value) || value < 0 || (integer && Math.floor(value) !== value)) {
+    throw new Error(rowNumber + '行目の「' + label + '」が不正です: ' + raw);
+  }
+  return value;
+}
+
+function akaRatio_(raw, label, rowNumber, allowAboveOne) {
+  if (akaIsNullToken_(raw)) return null;
+  let text = String(raw).trim();
+  if (typeof text.normalize === 'function') text = text.normalize('NFKC');
+  const percent = /%$/.test(text);
+  const numeric = Number(text.replace(/[,%\s]/g, ''));
+  const value = percent ? numeric / 100 : numeric;
+  if (!isFinite(value) || value < 0 || (!allowAboveOne && value > 1)) {
     throw new Error(rowNumber + '行目の「' + label + '」が不正です: ' + raw);
   }
   return value;
@@ -300,6 +338,46 @@ function akaPerformance_(spend, sales, roas, rowNumber) {
   return { roas: computedRoas, acos: computedAcos, issues: issues };
 }
 
+function akaMetricMismatch_(label, reported, computed, tolerance, rowNumber) {
+  if (reported === null || computed === null || Math.abs(reported - computed) <= tolerance) return [];
+  return [akaIssue_('METRIC_MISMATCH', rowNumber + '行目の「' + label + '」が実数からの再計算値と一致しません。', {
+    row_number: rowNumber,
+    field: label,
+    raw_values: [String(reported), String(computed)]
+  })];
+}
+
+function akaClickPerformance_(
+  impressions,
+  clicks,
+  spend,
+  orders,
+  reportedCtr,
+  reportedCpc,
+  reportedConversionRate,
+  reportedAcos,
+  computedAcos,
+  rowNumber
+) {
+  const ctr = impressions !== null && impressions > 0 && clicks !== null ? clicks / impressions : null;
+  const cpc = clicks !== null && clicks > 0 && spend !== null ? spend / clicks : null;
+  const conversionRate = clicks !== null && clicks > 0 && orders !== null ? orders / clicks : null;
+  let issues = [];
+  if (impressions !== null && clicks !== null && clicks > impressions) {
+    issues.push(akaIssue_(
+      'CLICKS_EXCEED_IMPRESSIONS',
+      rowNumber + '行目はクリック数がインプレッションを超えています。',
+      { row_number: rowNumber, raw_values: [String(impressions), String(clicks)] }
+    ));
+  }
+  issues = issues
+    .concat(akaMetricMismatch_('CTR', reportedCtr, ctr, 0.00015, rowNumber))
+    .concat(akaMetricMismatch_('CPC (JPY)', reportedCpc, cpc, 0.02, rowNumber))
+    .concat(akaMetricMismatch_('購入率', reportedConversionRate, conversionRate, 0.00015, rowNumber))
+    .concat(akaMetricMismatch_('ACOS', reportedAcos, computedAcos, 0.00015, rowNumber));
+  return { ctr: ctr, cpc: cpc, conversion_rate: conversionRate, issues: issues };
+}
+
 function akaTargetRow_(source, columns, rowNumber) {
   const stateRaw = source[columns.state] || '';
   const state = akaState_(stateRaw, rowNumber);
@@ -320,12 +398,29 @@ function akaTargetRow_(source, columns, rowNumber) {
   }
   const bid = akaNumber_(source[columns.current_bid], '入札額 (JPY)', rowNumber, false);
   const impressions = akaNumber_(source[columns.impressions], 'インプレッション', rowNumber, true);
+  const clicks = akaNumber_(source[columns.clicks], 'クリック数', rowNumber, true);
   const share = akaShare_(source[columns.top_of_search_share], '検索結果上部のインプレッションシェア', rowNumber);
   const spend = akaNumber_(source[columns.spend], '合計費用 (JPY)', rowNumber, false);
   const orders = akaNumber_(source[columns.orders], '商品購入数', rowNumber, true);
   const sales = akaNumber_(source[columns.sales], '売上 (JPY)', rowNumber, false);
+  const ctrReported = akaRatio_(source[columns.ctr], 'CTR', rowNumber, false);
+  const cpcReported = akaNumber_(source[columns.cpc], 'CPC (JPY)', rowNumber, false);
+  const conversionRateReported = akaRatio_(source[columns.conversion_rate], '購入率', rowNumber, false);
+  const acosReported = akaRatio_(source[columns.acos], 'ACOS', rowNumber, true);
   const roas = akaNumber_(source[columns.roas], 'ROAS', rowNumber, false);
   const performance = akaPerformance_(spend, sales, roas, rowNumber);
+  const clickPerformance = akaClickPerformance_(
+    impressions,
+    clicks,
+    spend,
+    orders,
+    ctrReported,
+    cpcReported,
+    conversionRateReported,
+    acosReported,
+    performance.acos,
+    rowNumber
+  );
   let issues = state.issues.concat(parsedMatch.issues)
     .concat(akaMissingIssue_(low, '推奨入札額 (低)(JPY)', rowNumber))
     .concat(akaMissingIssue_(mid, '推奨入札額 (中央値)(JPY)', rowNumber))
@@ -337,7 +432,8 @@ function akaTargetRow_(source, columns, rowNumber) {
     .concat(akaMissingIssue_(orders, '商品購入数', rowNumber))
     .concat(akaMissingIssue_(sales, '売上 (JPY)', rowNumber))
     .concat(akaMissingIssue_(roas, 'ROAS', rowNumber))
-    .concat(performance.issues);
+    .concat(performance.issues)
+    .concat(clickPerformance.issues);
   if (entityType === 'UNKNOWN') {
     issues.push(akaIssue_('UNKNOWN_ENTITY_TYPE', rowNumber + '行目をキーワードtargetか商品targetか判定できません。', {
       row_number: rowNumber, field: 'キーワード', raw_values: [keywordRaw, matchRaw]
@@ -360,10 +456,18 @@ function akaTargetRow_(source, columns, rowNumber) {
     suggested_bid_high_yen: high,
     current_bid_yen: bid,
     impressions: impressions,
+    clicks: clicks,
     top_of_search_impression_share: share.value,
     spend_yen: spend,
     orders: orders,
     sales_yen: sales,
+    ctr_reported: ctrReported,
+    ctr_computed: clickPerformance.ctr,
+    cpc_reported_yen: cpcReported,
+    cpc_computed_yen: clickPerformance.cpc,
+    conversion_rate_reported: conversionRateReported,
+    conversion_rate_computed: clickPerformance.conversion_rate,
+    acos_reported: acosReported,
     roas_reported: roas,
     roas_computed: performance.roas,
     acos_computed: performance.acos,
@@ -379,11 +483,29 @@ function akaSearchTermRow_(source, columns, rowNumber) {
   if (!String(termRaw).trim()) throw new Error(rowNumber + '行目の「お客様の検索用語」が空です。');
   if (!String(keywordRaw).trim()) throw new Error(rowNumber + '行目の「キーワード」が空です。');
   const bid = akaNumber_(source[columns.target_bid], 'ターゲットの入札額 (JPY)', rowNumber, false);
+  const impressions = akaNumber_(source[columns.impressions], 'インプレッション', rowNumber, true);
+  const clicks = akaNumber_(source[columns.clicks], 'クリック数', rowNumber, true);
   const spend = akaNumber_(source[columns.spend], '合計費用 (JPY)', rowNumber, false);
   const orders = akaNumber_(source[columns.orders], '商品購入数', rowNumber, true);
   const sales = akaNumber_(source[columns.sales], '売上 (JPY)', rowNumber, false);
+  const ctrReported = akaRatio_(source[columns.ctr], 'CTR', rowNumber, false);
+  const cpcReported = akaNumber_(source[columns.cpc], 'CPC (JPY)', rowNumber, false);
+  const conversionRateReported = akaRatio_(source[columns.conversion_rate], '購入率', rowNumber, false);
+  const acosReported = akaRatio_(source[columns.acos], 'ACOS', rowNumber, true);
   const roas = akaNumber_(source[columns.roas], 'ROAS', rowNumber, false);
   const performance = akaPerformance_(spend, sales, roas, rowNumber);
+  const clickPerformance = akaClickPerformance_(
+    impressions,
+    clicks,
+    spend,
+    orders,
+    ctrReported,
+    cpcReported,
+    conversionRateReported,
+    acosReported,
+    performance.acos,
+    rowNumber
+  );
   return {
     source_row_number: rowNumber,
     added_as_raw: addedRaw,
@@ -394,9 +516,18 @@ function akaSearchTermRow_(source, columns, rowNumber) {
     target_keyword_normalized: akaNormalizeQueryV1_(keywordRaw),
     normalization_version: 'query_norm_v1',
     target_bid_yen: bid,
+    impressions: impressions,
+    clicks: clicks,
     spend_yen: spend,
     orders: orders,
     sales_yen: sales,
+    ctr_reported: ctrReported,
+    ctr_computed: clickPerformance.ctr,
+    cpc_reported_yen: cpcReported,
+    cpc_computed_yen: clickPerformance.cpc,
+    conversion_rate_reported: conversionRateReported,
+    conversion_rate_computed: clickPerformance.conversion_rate,
+    acos_reported: acosReported,
     roas_reported: roas,
     roas_computed: performance.roas,
     acos_computed: performance.acos,
@@ -407,6 +538,7 @@ function akaSearchTermRow_(source, columns, rowNumber) {
       .concat(akaMissingIssue_(sales, '売上 (JPY)', rowNumber))
       .concat(akaMissingIssue_(roas, 'ROAS', rowNumber))
       .concat(performance.issues)
+      .concat(clickPerformance.issues)
   };
 }
 
@@ -424,17 +556,28 @@ function akaNormalizationStats_(values) {
   return { normalized_count: Object.keys(groups).length, collisions: collisions };
 }
 
-function akaBaseReportIssues_() {
-  return [
+function akaBaseReportIssues_(clickMetricsAvailable) {
+  const issues = [
     akaIssue_('PARTIAL_UNIVERSE_COVERAGE', '画面エクスポートが広告アカウント・キャンペーン内の全行を含む保証はありません。'),
-    akaIssue_('MISSING_SCOPE_IDENTITY', 'CSVにASIN、対象期間、キャンペーン、広告グループ、target IDがないため、分析時に別途確認が必要です。'),
-    akaIssue_('MISSING_CLICK_METRICS', 'Click、CPC、CTR、広告CVRがないため、停止・除外判断は限定されます。')
+    akaIssue_('MISSING_SCOPE_IDENTITY', 'CSVにASIN、対象期間、キャンペーン、広告グループ、target IDがないため、分析時に別途確認が必要です。')
   ];
+  if (!clickMetricsAvailable) {
+    issues.push(akaIssue_(
+      'MISSING_CLICK_METRICS',
+      'Click、CPC、CTR、広告CVRがないため、停止・除外判断は限定されます。'
+    ));
+  }
+  return issues;
 }
 
 function akaParseTarget_(records, filename, encoding) {
   akaAssertRows_(records);
-  const resolved = akaResolveColumns_(records[0], AKA_TARGET_COLUMNS_, false);
+  const resolved = akaResolveColumns_(
+    records[0],
+    AKA_TARGET_COLUMNS_,
+    false,
+    AKA_TARGET_OPTIONAL_COLUMNS_
+  );
   const rows = records.slice(1).map(function(row, index) {
     return akaTargetRow_(row, resolved.columns, index + 2);
   });
@@ -476,7 +619,8 @@ function akaParseTarget_(records, filename, encoding) {
       '同じキーワード原文・マッチタイプのtargetが複数あります。campaign等のidentityなしでは統合しません。'
     ));
   }
-  issues = issues.concat(akaBaseReportIssues_());
+  const clickMetricsAvailable = resolved.columns.clicks >= 0;
+  issues = issues.concat(akaBaseReportIssues_(clickMetricsAvailable));
   return {
     type: 'sponsored_products_target',
     file_name: filename,
@@ -494,6 +638,11 @@ function akaParseTarget_(records, filename, encoding) {
       unknown_entity_count: rows.filter(function(row) { return row.entity_type === 'UNKNOWN'; }).length,
       spend_row_count: rows.filter(function(row) { return (row.spend_yen || 0) > 0; }).length,
       order_row_count: rows.filter(function(row) { return (row.orders || 0) > 0; }).length,
+      click_metrics_available: clickMetricsAvailable,
+      click_row_count: rows.filter(function(row) { return (row.clicks || 0) > 0; }).length,
+      zero_order_click_row_count: rows.filter(function(row) {
+        return (row.clicks || 0) > 0 && row.orders === 0;
+      }).length,
       normalized_keyword_count: normalization.normalized_count,
       normalization_collision_count: normalization.collisions.length,
       normalization_collisions: normalization.collisions,
@@ -505,7 +654,12 @@ function akaParseTarget_(records, filename, encoding) {
 
 function akaParseSearchTerm_(records, filename, encoding) {
   akaAssertRows_(records);
-  const resolved = akaResolveColumns_(records[0], AKA_SEARCH_TERM_COLUMNS_, false);
+  const resolved = akaResolveColumns_(
+    records[0],
+    AKA_SEARCH_TERM_COLUMNS_,
+    false,
+    AKA_SEARCH_TERM_OPTIONAL_COLUMNS_
+  );
   const rows = records.slice(1).map(function(row, index) {
     return akaSearchTermRow_(row, resolved.columns, index + 2);
   });
@@ -531,7 +685,8 @@ function akaParseSearchTerm_(records, filename, encoding) {
       '同じ検索用語原文が複数行あります。target identityなしでは統合しません。'
     ));
   }
-  issues = issues.concat(akaBaseReportIssues_());
+  const clickMetricsAvailable = resolved.columns.impressions >= 0 && resolved.columns.clicks >= 0;
+  issues = issues.concat(akaBaseReportIssues_(clickMetricsAvailable));
   return {
     type: 'sponsored_products_search_term',
     file_name: filename,
@@ -548,6 +703,11 @@ function akaParseSearchTerm_(records, filename, encoding) {
       undeclared_added_as_count: rows.filter(function(row) { return row.added_match_type === null; }).length,
       spend_row_count: rows.filter(function(row) { return (row.spend_yen || 0) > 0; }).length,
       order_row_count: rows.filter(function(row) { return (row.orders || 0) > 0; }).length,
+      click_metrics_available: clickMetricsAvailable,
+      click_row_count: rows.filter(function(row) { return (row.clicks || 0) > 0; }).length,
+      zero_order_click_row_count: rows.filter(function(row) {
+        return (row.clicks || 0) > 0 && row.orders === 0;
+      }).length,
       normalized_search_term_count: normalization.normalized_count,
       normalization_collision_count: normalization.collisions.length,
       normalization_collisions: normalization.collisions,
@@ -717,7 +877,9 @@ function akaPrepare_(request) {
     data_usability: {
       existing_bid_decision: target ? 'VALID' : 'INVALID',
       new_exact_decision: search ? 'VALID' : 'INVALID',
-      negative_decision: search ? 'LIMITED' : 'INVALID',
+      negative_decision: search
+        ? (search.report.stats.click_metrics_available ? 'VALID' : 'LIMITED')
+        : 'INVALID',
       search_market_join: 'VALID',
       longitudinal_comparison: 'LIMITED'
     },
@@ -1130,17 +1292,26 @@ function akaTargetCandidate_(target, central, priorCandidates) {
   }
   const prior = akaFindAppliedPriorCandidate_(priorCandidates, target);
   const currentBid = akaNullableNumber_(target.current_bid_yen);
+  const impressions = akaNullableNumber_(target.impressions);
+  const clicks = akaNullableNumber_(target.clicks);
   const spend = akaNullableNumber_(target.spend_yen);
   const orders = akaNullableNumber_(target.orders);
   const sales = akaNullableNumber_(target.sales_yen);
   const acos = sales !== null && sales > 0 && spend !== null ? spend / sales : null;
+  const ctr = akaNullableNumber_(target.ctr_computed);
+  const cpc = akaNullableNumber_(target.cpc_computed_yen);
+  const conversionRate = akaNullableNumber_(target.conversion_rate_computed);
   const baseFacts = [
     akaFact_('TARGET_STATE', target.state, 'TARGET_CSV', 'TARGET_ROW'),
     akaFact_('CURRENT_BID_YEN', currentBid, 'TARGET_CSV', 'TARGET_ROW', 'JPY'),
     akaFact_('SUGGESTED_BID_LOW_YEN', target.suggested_bid_low_yen, 'TARGET_CSV', 'TARGET_ROW', 'JPY'),
     akaFact_('SUGGESTED_BID_MID_YEN', target.suggested_bid_mid_yen, 'TARGET_CSV', 'TARGET_ROW', 'JPY'),
     akaFact_('SUGGESTED_BID_HIGH_YEN', target.suggested_bid_high_yen, 'TARGET_CSV', 'TARGET_ROW', 'JPY'),
-    akaFact_('IMPRESSIONS', target.impressions, 'TARGET_CSV', 'TARGET_ROW', 'COUNT'),
+    akaFact_('IMPRESSIONS', impressions, 'TARGET_CSV', 'TARGET_ROW', 'COUNT'),
+    akaFact_('CLICKS', clicks, 'TARGET_CSV', 'TARGET_ROW', 'COUNT'),
+    akaFact_('CTR', ctr, 'CALCULATED_FROM_COUNTS', 'TARGET_ROW', 'RATIO'),
+    akaFact_('CPC_YEN', cpc, 'CALCULATED_FROM_COUNTS', 'TARGET_ROW', 'JPY'),
+    akaFact_('CONVERSION_RATE', conversionRate, 'CALCULATED_FROM_COUNTS', 'TARGET_ROW', 'RATIO'),
     akaFact_('SPEND_YEN', spend, 'TARGET_CSV', 'TARGET_ROW', 'JPY'),
     akaFact_('ORDERS', orders, 'TARGET_CSV', 'TARGET_ROW', 'COUNT'),
     akaFact_('SALES_YEN', sales, 'TARGET_CSV', 'TARGET_ROW', 'JPY'),
@@ -1158,6 +1329,9 @@ function akaTargetCandidate_(target, central, priorCandidates) {
     return akaCandidate_({
       family: 'MAINTAIN',
       decision: 'HOLD',
+      direction_reason_codes: impressions !== null && impressions > 0 && clicks === 0
+        ? ['IMPRESSIONS_WITHOUT_CLICKS']
+        : [],
       keyword_raw: target.keyword_raw,
       match_type: target.match_type,
       current_bid_yen: currentBid,
@@ -1207,6 +1381,37 @@ function akaTargetCandidate_(target, central, priorCandidates) {
   }
   if (orders <= 0) {
     if (spend > 0) {
+      if (clicks !== null && clicks >= AKA_POLICY_.zero_order_click_lower_min) {
+        return akaCandidate_({
+          family: 'EXISTING_BID',
+          decision: 'LOWER_TEST',
+          direction_reason_codes: [
+            'CLICKS_WITHOUT_ORDERS',
+            'ZERO_ORDER_CLICK_THRESHOLD_MET'
+          ],
+          keyword_raw: target.keyword_raw,
+          match_type: target.match_type,
+          current_bid_yen: currentBid,
+          proposed_bid_yen: akaLoweredBid_(target),
+          proposed_bid_range_yen: akaSuggestedRange_(target),
+          bid_basis: 'CURRENT_BID_SMALL_STEP',
+          data_usability: 'LIMITED',
+          facts: baseFacts.concat([
+            akaFact_(
+              'ZERO_ORDER_CLICK_LOWER_MIN',
+              AKA_POLICY_.zero_order_click_lower_min,
+              'POLICY',
+              'TARGET_ROW',
+              'COUNT'
+            )
+          ]),
+          missing_information: ['検索意図と商品ページの適合性は人間が確認'],
+          priority_basis: ['zero_order_click_evidence', 'clicks_desc', 'spend_desc', 'impressions_desc', 'source_row_number'],
+          priority: [0, -clicks, -spend, -(impressions || 0), target.source_row_number],
+          target_row_number: target.source_row_number,
+          source_row_number: target.source_row_number
+        });
+      }
       return akaCandidate_({
         family: 'EXISTING_BID',
         decision: 'NEED_MORE_DATA',
@@ -1216,9 +1421,14 @@ function akaTargetCandidate_(target, central, priorCandidates) {
         data_usability: 'LIMITED',
         bid_basis: 'INSUFFICIENT_FOR_NUMERIC_BID',
         facts: baseFacts,
-        missing_information: ['Click', 'CPC', 'CTR', '広告CVR'],
-        priority_basis: ['spend_desc', 'impressions_desc', 'source_row_number'],
-        priority: [1, -spend, -(target.impressions || 0), target.source_row_number],
+        missing_information: clicks === null
+          ? ['Click', 'CPC', 'CTR', '広告CVR']
+          : [
+            'クリック' + clicks + '件では0注文を入札要因と断定しない',
+            '検索意図と商品ページの適合性'
+          ],
+        priority_basis: ['spend_desc', 'clicks_desc', 'impressions_desc', 'source_row_number'],
+        priority: [1, -spend, -(clicks || 0), -(impressions || 0), target.source_row_number],
         target_row_number: target.source_row_number,
         source_row_number: target.source_row_number
       });
@@ -1231,7 +1441,11 @@ function akaTargetCandidate_(target, central, priorCandidates) {
       current_bid_yen: currentBid,
       data_usability: 'LIMITED',
       facts: baseFacts,
-      missing_information: ['費用・注文実績がないため入札変更の効果を判断できない'],
+      missing_information: impressions !== null && impressions > 0 && clicks === 0
+        ? [
+          '表示' + impressions + '回でクリック0件。入札変更より検索意図・広告訴求を先に確認'
+        ]
+        : ['費用・注文実績がないため入札変更の効果を判断できない'],
       priority_basis: ['impressions_desc', 'source_row_number'],
       priority: [1, -(target.impressions || 0), target.source_row_number],
       target_row_number: target.source_row_number,
@@ -1358,12 +1572,28 @@ function akaNewExactCandidate_(
   const spend = akaNullableNumber_(searchRow.spend_yen);
   const orders = akaNullableNumber_(searchRow.orders);
   const sales = akaNullableNumber_(searchRow.sales_yen);
+  const impressions = akaNullableNumber_(searchRow.impressions);
+  const clicks = akaNullableNumber_(searchRow.clicks);
+  const ctr = akaNullableNumber_(searchRow.ctr_computed);
+  const cpc = akaNullableNumber_(searchRow.cpc_computed_yen);
+  const conversionRate = akaNullableNumber_(searchRow.conversion_rate_computed);
   const relatedBid = akaNullableNumber_(searchRow.target_bid_yen);
   const market = marketJoin && marketJoin.market_snapshot;
   const facts = [
     akaFact_('SEARCH_TERM_SPEND_YEN', spend, 'SEARCH_TERM_CSV', 'SEARCH_TERM_ROW', 'JPY'),
     akaFact_('SEARCH_TERM_ORDERS', orders, 'SEARCH_TERM_CSV', 'SEARCH_TERM_ROW', 'COUNT'),
     akaFact_('SEARCH_TERM_SALES_YEN', sales, 'SEARCH_TERM_CSV', 'SEARCH_TERM_ROW', 'JPY'),
+    akaFact_('SEARCH_TERM_IMPRESSIONS', impressions, 'SEARCH_TERM_CSV', 'SEARCH_TERM_ROW', 'COUNT'),
+    akaFact_('SEARCH_TERM_CLICKS', clicks, 'SEARCH_TERM_CSV', 'SEARCH_TERM_ROW', 'COUNT'),
+    akaFact_('SEARCH_TERM_CTR', ctr, 'CALCULATED_FROM_COUNTS', 'SEARCH_TERM_ROW', 'RATIO'),
+    akaFact_('SEARCH_TERM_CPC_YEN', cpc, 'CALCULATED_FROM_COUNTS', 'SEARCH_TERM_ROW', 'JPY'),
+    akaFact_(
+      'SEARCH_TERM_CONVERSION_RATE',
+      conversionRate,
+      'CALCULATED_FROM_COUNTS',
+      'SEARCH_TERM_ROW',
+      'RATIO'
+    ),
     akaFact_('RELATED_TARGET_BID_YEN', relatedBid, 'SEARCH_TERM_CSV', 'SEARCH_TERM_ROW', 'JPY'),
     akaFact_(
       'SEARCH_MARKET_REFERENCE_PERIOD',
@@ -1404,9 +1634,13 @@ function akaNewExactCandidate_(
       suppression_reason: 'NO_ORDER_EVIDENCE',
       bid_basis: 'INSUFFICIENT_FOR_NUMERIC_BID',
       facts: facts,
-      missing_information: ['注文実績または検索意図の確認'],
-      priority_basis: ['spend_desc', 'source_row_number'],
-      priority: [3, -spend, searchRow.source_row_number],
+      missing_information: clicks === null
+        ? ['注文実績または検索意図の確認']
+        : [
+          'クリック' + clicks + '件で注文0件。完全一致追加より検索意図・商品ページを確認'
+        ],
+      priority_basis: ['clicks_desc', 'spend_desc', 'impressions_desc', 'source_row_number'],
+      priority: [3, -(clicks || 0), -spend, -(impressions || 0), searchRow.source_row_number],
       search_term_row_number: searchRow.source_row_number,
       source_row_number: searchRow.source_row_number,
       join: targetJoin
@@ -1420,7 +1654,9 @@ function akaNewExactCandidate_(
       'SEARCH_TERM_ORDERS_OBSERVED',
       'SEARCH_TERM_SALES_OBSERVED',
       'RELATED_TARGET_BID_AVAILABLE'
-    ],
+    ].concat(clicks !== null ? [
+      'CLICK_CONVERSION_EVIDENCE_AVAILABLE'
+    ] : []),
     keyword_raw: raw,
     search_term_raw: raw,
     match_type: 'EXACT',
@@ -1430,8 +1666,23 @@ function akaNewExactCandidate_(
     facts: facts,
     missing_information: proposed === null ? ['数値入札の参照値'] : [],
     suppression_reason: proposed === null ? 'NUMERIC_BID_REFERENCE_MISSING' : null,
-    priority_basis: ['orders_desc', 'sales_desc', 'market_purchase_desc', 'source_row_number'],
-    priority: [0, -orders, -sales, -(market ? market.purchase_total || 0 : 0), searchRow.source_row_number],
+    priority_basis: [
+      'orders_desc',
+      'conversion_rate_desc',
+      'sales_desc',
+      'clicks_desc',
+      'market_purchase_desc',
+      'source_row_number'
+    ],
+    priority: [
+      0,
+      -orders,
+      -(conversionRate || 0),
+      -sales,
+      -(clicks || 0),
+      -(market ? market.purchase_total || 0 : 0),
+      searchRow.source_row_number
+    ],
     search_term_row_number: searchRow.source_row_number,
     source_row_number: searchRow.source_row_number,
     join: targetJoin
@@ -1442,6 +1693,16 @@ function akaNegativeCandidate_(searchRow, targetJoin, marketJoin) {
   const spend = akaNullableNumber_(searchRow.spend_yen);
   const orders = akaNullableNumber_(searchRow.orders);
   if (spend === null || spend <= 0 || orders === null || orders > 0) return null;
+  const impressions = akaNullableNumber_(searchRow.impressions);
+  const clicks = akaNullableNumber_(searchRow.clicks);
+  const ctr = akaNullableNumber_(searchRow.ctr_computed);
+  const cpc = akaNullableNumber_(searchRow.cpc_computed_yen);
+  const conversionRate = akaNullableNumber_(searchRow.conversion_rate_computed);
+  const clickEvidenceSufficient = clicks !== null
+    && clicks >= AKA_POLICY_.negative_review_click_min;
+  const suppressionReason = clicks === null
+    ? 'MISSING_CLICK_METRICS_AND_INTENT_EVIDENCE'
+    : (clickEvidenceSufficient ? null : 'INSUFFICIENT_CLICK_EVIDENCE');
   return akaCandidate_({
     family: 'NEGATIVE_REVIEW',
     decision: 'PAUSE_REVIEW',
@@ -1449,12 +1710,33 @@ function akaNegativeCandidate_(searchRow, targetJoin, marketJoin) {
     search_term_raw: searchRow.customer_search_term_raw,
     match_type: searchRow.added_match_type || 'UNKNOWN',
     current_bid_yen: searchRow.target_bid_yen,
-    data_usability: 'LIMITED',
-    suppression_reason: 'MISSING_CLICK_METRICS_AND_INTENT_EVIDENCE',
+    direction_reason_codes: clickEvidenceSufficient
+      ? ['CLICKS_WITHOUT_ORDERS', 'NEGATIVE_REVIEW_CLICK_THRESHOLD_MET']
+      : [],
+    data_usability: clickEvidenceSufficient ? 'VALID' : 'LIMITED',
+    suppression_reason: suppressionReason,
     bid_basis: 'INSUFFICIENT_FOR_NUMERIC_BID',
     facts: [
       akaFact_('SEARCH_TERM_SPEND_YEN', spend, 'SEARCH_TERM_CSV', 'SEARCH_TERM_ROW', 'JPY'),
       akaFact_('SEARCH_TERM_ORDERS', orders, 'SEARCH_TERM_CSV', 'SEARCH_TERM_ROW', 'COUNT'),
+      akaFact_('SEARCH_TERM_IMPRESSIONS', impressions, 'SEARCH_TERM_CSV', 'SEARCH_TERM_ROW', 'COUNT'),
+      akaFact_('SEARCH_TERM_CLICKS', clicks, 'SEARCH_TERM_CSV', 'SEARCH_TERM_ROW', 'COUNT'),
+      akaFact_('SEARCH_TERM_CTR', ctr, 'CALCULATED_FROM_COUNTS', 'SEARCH_TERM_ROW', 'RATIO'),
+      akaFact_('SEARCH_TERM_CPC_YEN', cpc, 'CALCULATED_FROM_COUNTS', 'SEARCH_TERM_ROW', 'JPY'),
+      akaFact_(
+        'SEARCH_TERM_CONVERSION_RATE',
+        conversionRate,
+        'CALCULATED_FROM_COUNTS',
+        'SEARCH_TERM_ROW',
+        'RATIO'
+      ),
+      akaFact_(
+        'NEGATIVE_REVIEW_CLICK_MIN',
+        AKA_POLICY_.negative_review_click_min,
+        'POLICY',
+        'SEARCH_TERM_ROW',
+        'COUNT'
+      ),
       akaFact_(
         'ASIN_PURCHASE',
         marketJoin && marketJoin.market_snapshot ? marketJoin.market_snapshot.purchase_asin : null,
@@ -1463,9 +1745,13 @@ function akaNegativeCandidate_(searchRow, targetJoin, marketJoin) {
         'COUNT'
       )
     ],
-    missing_information: ['Click', 'CPC', '検索意図不一致の確認'],
-    priority_basis: ['spend_desc', 'market_purchase_asc', 'source_row_number'],
-    priority: [-spend, marketJoin && marketJoin.market_snapshot
+    missing_information: clicks === null
+      ? ['Click', 'CPC', '検索意図不一致の確認']
+      : (clickEvidenceSufficient
+        ? ['検索意図不一致の確認（自動除外はしない）']
+        : ['クリック' + clicks + '件では除外判断の材料が不足']),
+    priority_basis: ['click_evidence', 'clicks_desc', 'spend_desc', 'market_purchase_asc', 'source_row_number'],
+    priority: [clickEvidenceSufficient ? 0 : 1, -(clicks || 0), -spend, marketJoin && marketJoin.market_snapshot
       ? marketJoin.market_snapshot.purchase_asin || 0 : 0, searchRow.source_row_number],
     search_term_row_number: searchRow.source_row_number,
     source_row_number: searchRow.source_row_number,
@@ -1617,7 +1903,7 @@ function akaSelectWithinFamilies_(candidates) {
           basis: candidate.priority_basis
         };
       } else if (!candidate.suppression_reason) {
-        candidate.suppression_reason = limit === 0 ? 'FAMILY_DISABLED_IN_POLICY_V0' : 'FAMILY_SELECTION_LIMIT';
+        candidate.suppression_reason = limit === 0 ? 'FAMILY_DISABLED_IN_POLICY' : 'FAMILY_SELECTION_LIMIT';
       }
       delete candidate._priority;
     });
@@ -1731,7 +2017,10 @@ function analyzeAdvertisingKeywordSnapshot_(prepared, centralInput, previousSess
         marketJoins.some(function(join) { return join.data_usability !== 'VALID'; }) ? 'LIMITED' : 'VALID'
       ) : (searchRows.length ? 'LIMITED' : 'INVALID'),
       central_monthly: central.monthly ? 'VALID' : 'LIMITED',
-      negative_decision: 'LIMITED'
+      negative_decision: prepared.preview.reports.search_term
+        && prepared.preview.reports.search_term.stats.click_metrics_available
+        ? 'VALID'
+        : 'LIMITED'
     },
     joins: {
       target_search_term: targetJoins,

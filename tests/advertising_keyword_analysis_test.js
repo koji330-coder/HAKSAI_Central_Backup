@@ -298,7 +298,7 @@ assert.strictEqual(both.target_file_id, 'FILE-1');
 assert.strictEqual(both.search_term_file_id, 'FILE-2');
 assert.strictEqual(both.result_drive_file_id, 'FILE-3');
 assert.ok(both.selected_candidate_count > 0);
-assert.strictEqual(both.policy_version, 'advertising_keyword_decision_v0');
+assert.strictEqual(both.policy_version, 'advertising_keyword_decision_v1');
 assert.strictEqual(both.analysis.cross_family_ranking, false);
 assert.strictEqual(both.analysis.selection_scope, 'WITHIN_EACH_CANDIDATE_FAMILY');
 assert.strictEqual(both.analysis.policy.recommendation_primary, 'DIRECTION_AND_REASON');

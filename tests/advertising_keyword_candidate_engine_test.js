@@ -188,10 +188,12 @@ const central = {
 const first = context.analyzeAdvertisingKeywordSnapshot_(prepared, JSON.parse(JSON.stringify(central)), null);
 const second = context.analyzeAdvertisingKeywordSnapshot_(prepared, JSON.parse(JSON.stringify(central)), null);
 assert.deepStrictEqual(JSON.parse(JSON.stringify(first)), JSON.parse(JSON.stringify(second)), '同じ入力は同じ候補順序・入札額になる');
-assert.strictEqual(first.policy.policy_version, 'advertising_keyword_decision_v0');
+assert.strictEqual(first.policy.policy_version, 'advertising_keyword_decision_v1');
 assert.strictEqual(first.policy.recommendation_primary, 'DIRECTION_AND_REASON');
 assert.strictEqual(first.policy.numeric_bid_role, 'USER_ADJUSTABLE_REFERENCE');
 assert.strictEqual(first.policy.inventory_caution_suppresses_direction, false);
+assert.strictEqual(first.policy.click_metric_basis, 'RAW_COUNTS_RECOMPUTED_RATES');
+assert.strictEqual(first.policy.zero_order_click_lower_min, 8);
 assert.strictEqual(first.selection_scope, 'WITHIN_EACH_CANDIDATE_FAMILY');
 assert.strictEqual(first.cross_family_ranking, false);
 assert.strictEqual(first.central_context.monthly.sales, 120000);
@@ -284,7 +286,7 @@ allCandidates.forEach(candidate => {
   assert.ok(Array.isArray(candidate.missing_information));
   assert.ok(Object.prototype.hasOwnProperty.call(candidate, 'bid_basis'));
   assert.ok(Object.prototype.hasOwnProperty.call(candidate, 'suppression_reason'));
-  assert.strictEqual(candidate.policy_version, 'advertising_keyword_decision_v0');
+  assert.strictEqual(candidate.policy_version, 'advertising_keyword_decision_v1');
 });
 assert.ok(allCandidates.every(candidate =>
   !candidate.facts.some(fact => fact.code === 'ALLOCATED_CENTRAL_SALES')
@@ -305,6 +307,56 @@ const appliedCandidate = afterApplied.families
 assert.strictEqual(appliedCandidate.execution_status, 'ALREADY_APPLIED');
 assert.strictEqual(appliedCandidate.family, 'MAINTAIN');
 assert.strictEqual(appliedCandidate.current_bid_yen, 20);
+
+const clickTargetRows = targetRows.map((row, index) => row.concat([
+  index === 4 ? '10' : (Number(row[12]) > 0 ? '20' : '0')
+]));
+const clickSearchRows = searchRows.map((row, index) => row.concat([
+  '100',
+  index === 3 ? '12' : (index === 4 ? '2' : '20')
+]));
+const clickPrepared = context.akaPrepare_({
+  ...request,
+  targetFile: fileInput(
+    'Sponsored_Products_Target_Custom.csv',
+    csv(targetHeaders.concat(['クリック数']), clickTargetRows)
+  ),
+  searchTermFile: fileInput(
+    'Sponsored_Products_SearchTerm_Custom.csv',
+    csv(searchHeaders.concat(['インプレッション', 'クリック数']), clickSearchRows)
+  )
+});
+assert.strictEqual(clickPrepared.preview.parser_version, 'advertising_console_csv_v2');
+assert.strictEqual(clickPrepared.preview.reports.target.stats.click_metrics_available, true);
+assert.strictEqual(clickPrepared.preview.reports.search_term.stats.click_metrics_available, true);
+assert.strictEqual(clickPrepared.preview.data_usability.negative_decision, 'VALID');
+assert.ok(!clickPrepared.preview.warnings.some(warning => warning.code === 'MISSING_CLICK_METRICS'));
+const clickAnalysis = context.analyzeAdvertisingKeywordSnapshot_(
+  clickPrepared,
+  JSON.parse(JSON.stringify(central)),
+  null
+);
+const clickCandidates = clickAnalysis.families.flatMap(family => [
+  ...family.selected_candidates,
+  ...family.suppressed_candidates
+]);
+const zeroOrderLower = clickCandidates.find(candidate =>
+  candidate.family === 'EXISTING_BID'
+  && candidate.keyword_raw === 'デスクベル'
+  && candidate.match_type === 'EXACT'
+);
+assert.strictEqual(zeroOrderLower.decision, 'LOWER_TEST');
+assert.strictEqual(zeroOrderLower.bid_direction, 'LOWER');
+assert.ok(zeroOrderLower.direction_reason_codes.includes('CLICKS_WITHOUT_ORDERS'));
+assert.strictEqual(zeroOrderLower.facts.find(fact => fact.code === 'CLICKS').value, 10);
+const negativeWithClicks = clickAnalysis.families
+  .find(family => family.family === 'NEGATIVE_REVIEW')
+  .selected_candidates
+  .find(candidate => candidate.search_term_raw === 'ハンドベル');
+assert.ok(negativeWithClicks);
+assert.strictEqual(negativeWithClicks.data_usability, 'VALID');
+assert.strictEqual(negativeWithClicks.facts.find(fact => fact.code === 'SEARCH_TERM_CLICKS').value, 12);
+assert.ok(negativeWithClicks.direction_reason_codes.includes('NEGATIVE_REVIEW_CLICK_THRESHOLD_MET'));
 
 const shadowRun = first.families.map(family => ({
   family: family.family,
