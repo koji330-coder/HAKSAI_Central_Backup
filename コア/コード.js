@@ -24,12 +24,17 @@ const CENTRAL_PROTECTED_GET_ACTIONS_ = new Set([
   'getInboundPlan', 'getRecentTransactionsByAsin', 'getImportStatus', 'getReorderManagementData',
   'getProductCatalog', 'getResearchCommandCenter', 'getProductGrowthData', 'getProductActions',
   'getListingSnapshot', 'getProductMarketHistory', 'getProductMonthlyData', 'getProductConsultations',
-  'getProductConsultation', 'getMasterData', 'getPurchaseNotes'
+  'getProductConsultation', 'getMasterData', 'getPurchaseNotes',
+  'getSearchMarketPeriods', 'getSearchMarketSummary', 'getSearchMarketQueryDetail',
+  'getSearchMarketQueryHistory', 'getSearchMarketDiagnostics', 'getSearchMarketSignals',
+  'getSearchMarketNarrative', 'getAdvertisingKeywordAnalysis'
 ]);
 
 const CENTRAL_PROTECTED_POST_ACTIONS_ = new Set([
   'upsertManualCostFallback', 'syncInventory', 'syncInboundPlan', 'syncTransactions',
-  'previewAdProductReport', 'syncAdProductReport', 'syncBusinessReport', 'createDomesticOrder',
+  'previewAdProductReport', 'syncAdProductReport', 'syncBusinessReport',
+  'previewSearchQueryPerformance', 'syncSearchQueryPerformance', 'createDomesticOrder',
+  'previewAdvertisingKeywordAnalysis', 'runAdvertisingKeywordAnalysis',
   'updateDomesticOrder', 'cancelDomesticOrder', 'receiveDomesticOrder', 'saveProductAction',
   'archiveProductAction', 'refreshOwnListingSnapshot', 'refreshProductMarketHistory',
   'consultProductGrowthMaika', 'sendProductConsultationMessage', 'saveProductContextNote',
@@ -505,6 +510,61 @@ function doGet(e) {
     if (action === 'getProductCatalog') {
       return jsonResponse({ status: 'ok', data: getProductCatalog_() });
     }
+    if (action === 'getSearchMarketPeriods') {
+      return jsonResponse({ status: 'ok', data: getSearchMarketPeriods_() });
+    }
+    if (action === 'getSearchMarketSummary') {
+      return jsonResponse({ status: 'ok', data: getSearchMarketSummary_(
+        e.parameter.asin || '',
+        e.parameter.period || '',
+        e.parameter.marketplace || ''
+      ) });
+    }
+    if (action === 'getSearchMarketQueryDetail') {
+      return jsonResponse({ status: 'ok', data: getSearchMarketQueryDetail_(
+        e.parameter.asin || '',
+        e.parameter.period || '',
+        e.parameter.searchQueryRaw || '',
+        e.parameter.marketplace || ''
+      ) });
+    }
+    if (action === 'getSearchMarketQueryHistory') {
+      return jsonResponse({ status: 'ok', data: getSearchMarketQueryHistory_(
+        e.parameter.asin || '',
+        e.parameter.searchQueryRaw || '',
+        e.parameter.marketplace || ''
+      ) });
+    }
+    if (action === 'getSearchMarketDiagnostics') {
+      return jsonResponse({ status: 'ok', data: getSearchMarketDiagnostics_(
+        e.parameter.asin || '',
+        e.parameter.period || '',
+        e.parameter.marketplace || '',
+        e.parameter.lookbackMonths || '4'
+      ) });
+    }
+    if (action === 'getSearchMarketSignals') {
+      return jsonResponse({ status: 'ok', data: getSearchMarketSignals_(
+        e.parameter.asin || '',
+        e.parameter.period || '',
+        e.parameter.marketplace || '',
+        e.parameter.lookbackMonths || '4'
+      ) });
+    }
+    if (action === 'getSearchMarketNarrative') {
+      return jsonResponse({ status: 'ok', data: getSearchMarketNarrative_(
+        e.parameter.asin || '',
+        e.parameter.period || '',
+        e.parameter.marketplace || '',
+        e.parameter.lookbackMonths || '4'
+      ) });
+    }
+    if (action === 'getAdvertisingKeywordAnalysis') {
+      return jsonResponse({
+        status: 'ok',
+        data: getAdvertisingKeywordAnalysis_(e.parameter.sessionId || '')
+      });
+    }
     if (action === 'getProductGrowthData') {
       return jsonResponse({ status: 'ok', data: getProductGrowthData_(e.parameter.asin || '', e.parameter.days || '30', e.parameter.endDate || '') });
     }
@@ -874,6 +934,39 @@ function doPost(e) {
 
     if (action === 'syncBusinessReport') {
           return jsonResponse({ status:'ok', data: syncBusinessReport(body.rows||[], body.dateFrom||'', body.dateTo||'', body.rawBase64||'', body.filename||'') });
+    }
+
+    if (action === 'previewSearchQueryPerformance') {
+      return jsonResponse({
+        status: 'ok',
+        data: previewSearchQueryPerformance(body.report || {})
+      });
+    }
+
+    if (action === 'syncSearchQueryPerformance') {
+      return jsonResponse({
+        status: 'ok',
+        data: syncSearchQueryPerformance(
+          body.report || {},
+          body.rawBase64 || '',
+          body.filename || '',
+          body.fileSha256 || ''
+        )
+      });
+    }
+
+    if (action === 'previewAdvertisingKeywordAnalysis') {
+      return jsonResponse({
+        status: 'ok',
+        data: previewAdvertisingKeywordAnalysis(body.request || {})
+      });
+    }
+
+    if (action === 'runAdvertisingKeywordAnalysis') {
+      return jsonResponse({
+        status: 'ok',
+        data: runAdvertisingKeywordAnalysis(body.request || {})
+      });
     }
 
     if (action === 'setAlertSnooze') {
