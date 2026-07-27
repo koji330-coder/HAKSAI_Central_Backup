@@ -822,7 +822,12 @@ function doPost(e) {
     }
 
     if (action === 'saveProductAction') {
-      return jsonResponse({ status: 'ok', data: saveProductAction_(body.item || {}, body.images || []) });
+      return jsonResponse({
+        status: 'ok',
+        data: body.advertisingContext
+          ? saveAdvertisingAdjustmentAction_(body.item || {}, body.images || [], body.advertisingContext)
+          : saveProductAction_(body.item || {}, body.images || [])
+      });
     }
     if (action === 'archiveProductAction') {
       return jsonResponse({ status: 'ok', data: archiveProductAction_(body.actionId || '') });

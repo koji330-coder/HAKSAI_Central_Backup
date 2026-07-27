@@ -7,6 +7,12 @@ const PG_ACTION_HEADERS = [
   'tags_json','related_url','attachments_json','show_on_chart','action_scope','target_asins_json',
   'variation_group_key','created_at','updated_at'
 ];
+const PG_AD_ACTION_CONTEXT_SHEET = 'advertising_action_contexts';
+const PG_AD_ACTION_CONTEXT_HEADERS = [
+  'context_id','action_id','asin','analysis_session_id','candidate_ids_json',
+  'execution_detail_mode','before_snapshot_file_id','after_snapshot_file_id',
+  'evaluation_status','created_at','updated_at'
+];
 const PG_SNAPSHOT_HEADERS = [
   'snapshot_id','page_project_id','own_asin','captured_at','checked_at','source','content_hash',
   'title','bullets_json','description','image_urls_json','aplus_json','price','rating','review_count',
@@ -51,6 +57,35 @@ function pgEnsureSheet_(name, requiredHeaders) {
 function pgParseJson_(value, fallback) {
   if (value && typeof value === 'object') return value;
   try { return value ? JSON.parse(value) : fallback; } catch (e) { return fallback; }
+}
+
+function pgHydrateAdvertisingActionContext_(headers, row) {
+  const obj = {};
+  headers.forEach(function(h, i) { obj[h] = row[i]; });
+  obj.candidate_ids = pgParseJson_(obj.candidate_ids_json, []);
+  obj.selected_candidate_count = obj.candidate_ids.length;
+  delete obj.candidate_ids_json;
+  return obj;
+}
+
+function pgAdvertisingActionContextMap_() {
+  const ref = pgEnsureSheet_(PG_AD_ACTION_CONTEXT_SHEET, PG_AD_ACTION_CONTEXT_HEADERS);
+  const values = ref.sheet.getDataRange().getValues();
+  const out = {};
+  if (values.length < 2) return out;
+  values.slice(1).forEach(function(row) {
+    const context = pgHydrateAdvertisingActionContext_(ref.headers, row);
+    if (context.action_id) out[String(context.action_id)] = context;
+  });
+  return out;
+}
+
+function pgAttachAdvertisingContexts_(actions) {
+  const contexts = pgAdvertisingActionContextMap_();
+  return actions.map(function(action) {
+    if (contexts[action.action_id]) action.advertising_context = contexts[action.action_id];
+    return action;
+  });
 }
 
 function pgNormalizeActionAsins_(primaryAsin, values) {
@@ -251,11 +286,13 @@ function getProductActions_(asinValue, includeArchived) {
   const ref = pgEnsureSheet_(PG_ACTION_SHEET, PG_ACTION_HEADERS);
   const values = ref.sheet.getDataRange().getValues();
   if (values.length < 2) return [];
-  return values.slice(1).map(function(row) {
+  const actions = values.slice(1).map(function(row) {
     return pgHydrateProductAction_(ref.headers, row, asin);
   }).filter(function(obj) {
     return pgActionAppliesToAsin_(obj, asin) && (includeArchived || obj.status !== 'archived');
-  }).sort(function(a, b) { return String(b.action_at).localeCompare(String(a.action_at)); });
+  });
+  return pgAttachAdvertisingContexts_(actions)
+    .sort(function(a, b) { return String(b.action_at).localeCompare(String(a.action_at)); });
 }
 
 // スマホ秘書用。ASINを限定せず、product_actions を正本のまま横断参照する。
@@ -263,9 +300,10 @@ function getAllProductActions_(includeArchived) {
   const ref = pgEnsureSheet_(PG_ACTION_SHEET, PG_ACTION_HEADERS);
   const values = ref.sheet.getDataRange().getValues();
   if (values.length < 2) return [];
-  return values.slice(1).map(function(row) { return pgHydrateProductAction_(ref.headers, row, ''); }).filter(function(obj) {
+  const actions = values.slice(1).map(function(row) { return pgHydrateProductAction_(ref.headers, row, ''); }).filter(function(obj) {
     return obj.action_id && (includeArchived || obj.status !== 'archived');
-  }).sort(function(a, b) {
+  });
+  return pgAttachAdvertisingContexts_(actions).sort(function(a, b) {
     return String(b.action_at).localeCompare(String(a.action_at)) || String(b.updated_at).localeCompare(String(a.updated_at));
   });
 }
@@ -367,6 +405,157 @@ function saveProductAction_(input, images) {
   });
   delete saved.tags_json; delete saved.attachments_json; delete saved.target_asins_json;
   return saved;
+}
+
+function pgAdvertisingMetricSnapshot_(report) {
+  if (!report || !Array.isArray(report.rows)) return null;
+  const totals = report.rows.reduce(function(sum, row) {
+    ['impressions','clicks','spend_yen','orders','sales_yen'].forEach(function(key) {
+      const value = Number(row[key]);
+      if (isFinite(value)) sum[key] += value;
+    });
+    return sum;
+  }, { impressions:0, clicks:0, spend_yen:0, orders:0, sales_yen:0 });
+  totals.ctr = totals.impressions > 0 ? totals.clicks / totals.impressions : null;
+  totals.cpc_yen = totals.clicks > 0 ? totals.spend_yen / totals.clicks : null;
+  totals.conversion_rate = totals.clicks > 0 ? totals.orders / totals.clicks : null;
+  totals.acos = totals.sales_yen > 0 ? totals.spend_yen / totals.sales_yen : null;
+  totals.roas = totals.spend_yen > 0 ? totals.sales_yen / totals.spend_yen : null;
+  return {
+    aggregation_scope: 'RETURNED_CSV_ROWS_NOT_ACCOUNT_UNIVERSE',
+    row_count: report.rows.length,
+    click_metrics_available: !!(report.stats && report.stats.click_metrics_available),
+    totals: totals
+  };
+}
+
+function pgAllAdvertisingCandidates_(session) {
+  const out = [];
+  const seen = {};
+  const families = session && session.analysis && Array.isArray(session.analysis.families)
+    ? session.analysis.families : [];
+  families.forEach(function(family) {
+    ['selected_candidates','suppressed_candidates'].forEach(function(key) {
+      (Array.isArray(family[key]) ? family[key] : []).forEach(function(candidate) {
+        const id = String(candidate.candidate_id || '');
+        if (!id || seen[id]) return;
+        seen[id] = true;
+        out.push(candidate);
+      });
+    });
+  });
+  return out;
+}
+
+function pgAdvertisingSnapshotFolder_(actionId) {
+  if (!DRIVE_FOLDER_ID) throw new Error('DRIVE_FOLDER_ID が未設定です。');
+  const root = DriveApp.getFolderById(DRIVE_FOLDER_ID);
+  const folder = function(parent, name) {
+    const iterator = parent.getFoldersByName(name);
+    return iterator.hasNext() ? iterator.next() : parent.createFolder(name);
+  };
+  return folder(folder(root, 'advertising_action_snapshots'), actionId);
+}
+
+function saveAdvertisingAdjustmentAction_(input, images, contextInput) {
+  input = input || {};
+  contextInput = contextInput || {};
+  images = Array.isArray(images) ? images.slice(0, 10) : [];
+  const asin = pgAsin_(input.asin);
+  const sessionId = String(contextInput.analysis_session_id || '').trim();
+  if (!sessionId) throw new Error('広告分析sessionが必要です。');
+  const session = getAdvertisingKeywordAnalysis_(sessionId);
+  if (!session || String(session.preview.metadata.asin || '').trim().toUpperCase() !== asin) {
+    throw new Error('広告分析sessionとアクションのASINが一致しません。');
+  }
+  const requestedIds = Array.from(new Set((Array.isArray(contextInput.candidate_ids)
+    ? contextInput.candidate_ids : []).map(function(id) { return String(id || '').trim(); }).filter(Boolean)));
+  if (!requestedIds.length) throw new Error('今回の変更に含める分析候補を1件以上選択してください。');
+  const candidates = pgAllAdvertisingCandidates_(session);
+  const candidateMap = {};
+  candidates.forEach(function(candidate) { candidateMap[String(candidate.candidate_id)] = candidate; });
+  const unknownIds = requestedIds.filter(function(id) { return !candidateMap[id]; });
+  if (unknownIds.length) throw new Error('分析sessionに存在しないcandidate IDが含まれています。');
+  const allowedModes = ['NO_DETAIL','FREE_TEXT','SCREENSHOT','STRUCTURED'];
+  const detailMode = String(contextInput.execution_detail_mode || 'NO_DETAIL').trim().toUpperCase();
+  if (allowedModes.indexOf(detailMode) < 0) throw new Error('実施内容の記録方式が不正です。');
+  const actionId = String(input.action_id || '').trim() || ('ACT-' + Utilities.getUuid());
+  const now = new Date().toISOString();
+  const beforeSnapshot = {
+    schema_version: 'advertising_action_before_snapshot_v1',
+    snapshot_role: 'BEFORE',
+    captured_at: now,
+    action_id: actionId,
+    asin: asin,
+    analysis_session_id: session.session_id,
+    advertising_period: {
+      from: session.preview.metadata.period_from,
+      to: session.preview.metadata.period_to
+    },
+    coverage: {
+      file_scope_status: session.preview.metadata.file_scope_status,
+      universe_coverage: session.preview.metadata.universe_coverage,
+      returned_target_count: session.preview.metadata.returned_target_count,
+      returned_search_term_count: session.preview.metadata.returned_search_term_count
+    },
+    source: {
+      policy_version: session.policy_version,
+      parser_version: session.preview.parser_version,
+      target_file_id: session.target_file_id || null,
+      target_file_sha256: session.preview.metadata.target_file_sha256 || null,
+      search_term_file_id: session.search_term_file_id || null,
+      search_term_file_sha256: session.preview.metadata.search_term_file_sha256 || null,
+      analysis_result_file_id: session.result_drive_file_id || null
+    },
+    selected_candidate_ids: requestedIds,
+    selected_candidates: requestedIds.map(function(id) { return candidateMap[id]; }),
+    advertising_efficiency: {
+      warning: 'CSVの返却行だけを集計した変更前snapshot。広告アカウント・キャンペーン全体とは限らない。',
+      target_rows: pgAdvertisingMetricSnapshot_(session.preview.reports.target),
+      search_term_rows: pgAdvertisingMetricSnapshot_(session.preview.reports.search_term)
+    },
+    central_context: session.analysis.central_context || null
+  };
+  let snapshotFile = null;
+  try {
+    snapshotFile = pgAdvertisingSnapshotFolder_(actionId).createFile(Utilities.newBlob(
+      JSON.stringify(beforeSnapshot),
+      'application/json',
+      'before_snapshot.json'
+    ));
+    const saved = saveProductAction_(Object.assign({}, input, {
+      action_id: actionId,
+      asin: asin,
+      action_type: '広告調整'
+    }), images);
+    const ref = pgEnsureSheet_(PG_AD_ACTION_CONTEXT_SHEET, PG_AD_ACTION_CONTEXT_HEADERS);
+    const context = {
+      context_id: 'ADCTX-' + Utilities.getUuid(),
+      action_id: actionId,
+      asin: asin,
+      analysis_session_id: session.session_id,
+      candidate_ids_json: JSON.stringify(requestedIds),
+      execution_detail_mode: detailMode,
+      before_snapshot_file_id: snapshotFile.getId(),
+      after_snapshot_file_id: '',
+      evaluation_status: 'WAITING_FOR_AFTER',
+      created_at: now,
+      updated_at: now
+    };
+    ref.sheet.appendRow(ref.headers.map(function(header) {
+      return context[header] !== undefined ? context[header] : '';
+    }));
+    saved.advertising_context = pgHydrateAdvertisingActionContext_(
+      ref.headers,
+      ref.headers.map(function(header) { return context[header] !== undefined ? context[header] : ''; })
+    );
+    return saved;
+  } catch (error) {
+    if (snapshotFile && typeof snapshotFile.setTrashed === 'function') {
+      try { snapshotFile.setTrashed(true); } catch (cleanupError) { Logger.log(cleanupError.message); }
+    }
+    throw error;
+  }
 }
 
 function archiveProductAction_(actionId) {
