@@ -116,6 +116,9 @@ const rootFolder = new FakeFolder('root');
 let waitLockCalls = 0;
 let releaseLockCalls = 0;
 let uuidSequence = 0;
+let monthlyCalls = 0;
+let searchMarketPeriodCalls = 0;
+let searchMarketCalls = 0;
 
 function digestBytes(input) {
   return typeof input === 'string'
@@ -176,6 +179,47 @@ const context = {
     return sheets.get(name);
   },
   getHeaders_: sheet => sheet.rows[0].slice()
+  ,
+  getProductMonthlyData_: (asin, months, period) => {
+    monthlyCalls++;
+    assert.strictEqual(asin, 'B0FXTQPGSB');
+    assert.strictEqual(months, 1);
+    return {
+      points: [{
+        period,
+        sales: 10000,
+        gross_profit: 4000,
+        ad_spend: 1000,
+        profit_after_ad: 3000
+      }]
+    };
+  },
+  getSearchMarketPeriods_: () => {
+    searchMarketPeriodCalls++;
+    return {
+      asins: [{
+        marketplace: 'JP',
+        asin: 'B0FXTQPGSB',
+        periods: ['2026-05', '2026-06'],
+        latest_period: '2026-06'
+      }],
+      available_periods: ['2026-05', '2026-06']
+    };
+  },
+  getSearchMarketSummary_: (asin, period, marketplace) => {
+    searchMarketCalls++;
+    assert.strictEqual(period, '2026-06', '広告月以前の最新検索市場月を参照する');
+    return {
+      asin,
+      period_key: period,
+      marketplace,
+      report_scope: 'TOP_QUERIES',
+      query_limit: 100,
+      returned_query_count: 0,
+      current_query_count: 0,
+      rows: []
+    };
+  }
 };
 vm.createContext(context);
 const sourcePath = path.join(__dirname, '..', '分析', '広告キーワード分析.js');
@@ -244,14 +288,22 @@ assert.strictEqual(preview.data_usability.existing_bid_decision, 'VALID');
 assert.strictEqual(preview.data_usability.new_exact_decision, 'VALID');
 assert.strictEqual(fileSequence, filesBeforePreview, 'previewはDriveへ書き込まない');
 assert.strictEqual(sheets.size, 0, 'previewはSheetへ書き込まない');
+assert.strictEqual(monthlyCalls, 0, 'previewはCentral月次を読まない');
+assert.strictEqual(searchMarketPeriodCalls, 0, 'previewは検索市場indexを読まない');
+assert.strictEqual(searchMarketCalls, 0, 'previewは検索市場を読まない');
 
 const both = context.runAdvertisingKeywordAnalysis(request());
-assert.strictEqual(both.status, 'SNAPSHOT_SAVED');
+assert.strictEqual(both.status, 'ANALYZED');
 assert.strictEqual(both.target_file_id, 'FILE-1');
 assert.strictEqual(both.search_term_file_id, 'FILE-2');
 assert.strictEqual(both.result_drive_file_id, 'FILE-3');
-assert.strictEqual(both.selected_candidate_count, 0);
-assert.strictEqual(both.policy_version, 'NOT_RUN_PR_AK2');
+assert.ok(both.selected_candidate_count > 0);
+assert.strictEqual(both.policy_version, 'advertising_keyword_decision_v0');
+assert.strictEqual(both.analysis.cross_family_ranking, false);
+assert.strictEqual(both.analysis.selection_scope, 'WITHIN_EACH_CANDIDATE_FAMILY');
+assert.strictEqual(both.analysis.policy.recommendation_primary, 'DIRECTION_AND_REASON');
+assert.strictEqual(both.analysis.central_context.search_market_reference.reference_period, '2026-06');
+assert.strictEqual(both.analysis.central_context.search_market_reference.lag_months, 1);
 assert.strictEqual(both.audit.client_preview_trusted, false);
 
 const sessionSheet = sheets.get('advertising_analysis_sessions');
@@ -313,6 +365,9 @@ assert.throws(
 );
 assert.strictEqual(waitLockCalls, 3);
 assert.strictEqual(releaseLockCalls, 3);
+assert.strictEqual(monthlyCalls, 3, 'runごとにASIN×月を1回だけ取得する');
+assert.strictEqual(searchMarketPeriodCalls, 3, 'runごとに検索市場indexを1回だけ取得する');
+assert.strictEqual(searchMarketCalls, 3, 'runごとに検索市場scopeを1回だけ取得する');
 
 console.log(JSON.stringify({
   preview_file_presence: preview.file_presence,

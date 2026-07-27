@@ -16,8 +16,30 @@ const AKA_SESSION_HEADERS_ = [
 const AKA_PARSER_VERSION_ = 'advertising_console_csv_v1';
 const AKA_PREVIEW_SCHEMA_VERSION_ = 'advertising_keyword_analysis_preview_v1';
 const AKA_SESSION_SCHEMA_VERSION_ = 'advertising_keyword_analysis_session_v1';
+const AKA_ANALYSIS_SCHEMA_VERSION_ = 'advertising_keyword_analysis_v1';
+const AKA_POLICY_VERSION_ = 'advertising_keyword_decision_v0';
 const AKA_MAX_FILE_BYTES_ = 5 * 1024 * 1024;
 const AKA_ROAS_TOLERANCE_ = 0.000001;
+const AKA_POLICY_ = {
+  policy_version: AKA_POLICY_VERSION_,
+  bid_raise_step_ratio: 0.10,
+  bid_lower_step_ratio: 0.10,
+  family_selection_limits: {
+    EXISTING_BID: 5,
+    NEW_EXACT: 3,
+    NEGATIVE_REVIEW: 0,
+    MAINTAIN: 3,
+    DATA_QUALITY: 5
+  },
+  selection_scope: 'WITHIN_EACH_CANDIDATE_FAMILY',
+  cross_family_ranking: false,
+  recommendation_primary: 'DIRECTION_AND_REASON',
+  numeric_bid_is_test_value: true,
+  numeric_bid_role: 'USER_ADJUSTABLE_REFERENCE',
+  inventory_caution_suppresses_direction: false,
+  search_market_reference_rule: 'LATEST_AVAILABLE_ON_OR_BEFORE_AD_PERIOD',
+  click_metrics_required_for_negative: true
+};
 
 const AKA_TARGET_COLUMNS_ = [
   ['state', '状態', ['状態', 'State']],
@@ -722,6 +744,1009 @@ function previewAdvertisingKeywordAnalysis(request) {
   return akaPrepare_(request).preview;
 }
 
+function akaNullableNumber_(value) {
+  if (value === '' || value === null || value === undefined) return null;
+  const number = Number(value);
+  return isFinite(number) ? number : null;
+}
+
+function akaFact_(code, value, source, scope, unit) {
+  return {
+    code: code,
+    value: value === undefined ? null : value,
+    source: source,
+    scope: scope,
+    unit: unit || null
+  };
+}
+
+function akaSha256TextHex_(value) {
+  return Utilities.computeDigest(
+    Utilities.DigestAlgorithm.SHA_256,
+    String(value),
+    Utilities.Charset ? Utilities.Charset.UTF_8 : undefined
+  ).map(function(byte) {
+    return ('0' + ((Number(byte) + 256) % 256).toString(16)).slice(-2);
+  }).join('').toUpperCase();
+}
+
+function akaCandidateId_(family, decision, raw, matchType, sourceRow) {
+  return 'AKC-' + akaSha256TextHex_([
+    AKA_POLICY_VERSION_, family, decision, raw || '', matchType || '', sourceRow || ''
+  ].join('\n')).slice(0, 20);
+}
+
+function akaBidDirection_(decision) {
+  if (decision === 'RAISE_TEST') return 'RAISE';
+  if (decision === 'LOWER_TEST') return 'LOWER';
+  if (decision === 'ADD_EXACT') return 'ADD';
+  if (decision === 'HOLD') return 'HOLD';
+  if (decision === 'PAUSE_REVIEW') return 'REVIEW';
+  return 'NONE';
+}
+
+function akaCandidate_(input) {
+  const candidate = {
+    candidate_id: akaCandidateId_(
+      input.family,
+      input.decision,
+      input.keyword_raw || input.search_term_raw,
+      input.match_type,
+      input.source_row_number
+    ),
+    family: input.family,
+    decision: input.decision,
+    bid_direction: akaBidDirection_(input.decision),
+    direction_reason_codes: input.direction_reason_codes || [],
+    keyword_raw: input.keyword_raw || '',
+    search_term_raw: input.search_term_raw || null,
+    match_type: input.match_type || 'UNKNOWN',
+    current_bid_yen: input.current_bid_yen === undefined ? null : input.current_bid_yen,
+    proposed_bid_yen: input.proposed_bid_yen === undefined ? null : input.proposed_bid_yen,
+    proposed_bid_range_yen: input.proposed_bid_range_yen || null,
+    bid_basis: input.bid_basis || null,
+    numeric_bid_role: input.proposed_bid_yen === undefined || input.proposed_bid_yen === null
+      ? 'NONE'
+      : 'USER_ADJUSTABLE_REFERENCE',
+    operational_cautions: input.operational_cautions || [],
+    data_usability: input.data_usability || 'LIMITED',
+    evidence_status: input.data_usability === 'VALID' ? 'USABLE' : (
+      input.data_usability === 'INVALID' ? 'UNUSABLE' : 'LIMITED'
+    ),
+    facts: input.facts || [],
+    missing_information: input.missing_information || [],
+    suppression_reason: input.suppression_reason || null,
+    priority_basis: input.priority_basis || [],
+    policy_version: AKA_POLICY_VERSION_,
+    source: {
+      target_row_number: input.target_row_number || null,
+      search_term_row_number: input.search_term_row_number || null,
+      search_market_query_raw: input.search_market_query_raw || null
+    },
+    join: input.join || null,
+    execution_status: input.execution_status || 'NOT_APPLIED',
+    previous_candidate_id: input.previous_candidate_id || null,
+    selected: false,
+    selection_reason: null,
+    _priority: input.priority || []
+  };
+  return candidate;
+}
+
+function akaMonthDistance_(fromPeriod, toPeriod) {
+  const from = String(fromPeriod || '').match(/^(\d{4})-(\d{2})$/);
+  const to = String(toPeriod || '').match(/^(\d{4})-(\d{2})$/);
+  if (!from || !to) return null;
+  return (Number(to[1]) * 12 + Number(to[2])) - (Number(from[1]) * 12 + Number(from[2]));
+}
+
+function akaLatestSearchMarketReference_(asinValue, marketplaceValue, advertisingPeriod) {
+  const index = getSearchMarketPeriods_();
+  const asin = String(asinValue || '').trim().toUpperCase();
+  const marketplace = String(marketplaceValue || '').trim().toUpperCase();
+  const items = index && Array.isArray(index.asins) ? index.asins : [];
+  const item = items.filter(function(candidate) {
+    return String(candidate.asin || '').trim().toUpperCase() === asin
+      && (!marketplace || String(candidate.marketplace || '').trim().toUpperCase() === marketplace);
+  })[0] || null;
+  if (!item || !Array.isArray(item.periods)) return null;
+  const eligible = item.periods.map(function(period) {
+    return String(period || '').trim();
+  }).filter(function(period) {
+    return /^\d{4}-\d{2}$/.test(period) && period <= advertisingPeriod;
+  }).sort();
+  if (!eligible.length) return null;
+  const referencePeriod = eligible[eligible.length - 1];
+  return {
+    rule: AKA_POLICY_.search_market_reference_rule,
+    advertising_period: advertisingPeriod,
+    reference_period: referencePeriod,
+    lag_months: akaMonthDistance_(referencePeriod, advertisingPeriod),
+    is_same_period: referencePeriod === advertisingPeriod
+  };
+}
+
+function akaOperationalCautions_(central) {
+  const inventory = central && central.monthly && central.monthly.inventory;
+  if (!inventory || !String(inventory.alert || '').trim()) return [];
+  const alert = String(inventory.alert);
+  if (/適正/.test(alert) && !/至急|注意|警告|欠品/.test(alert)) return [];
+  return [{
+    code: 'INVENTORY_ATTENTION',
+    severity: 'WARNING',
+    message: alert,
+    suppresses_bid_direction: false,
+    facts: {
+      available: akaNullableNumber_(inventory.available),
+      inbound: akaNullableNumber_(inventory.inbound),
+      days_remain: akaNullableNumber_(inventory.days_remain),
+      snapshot_date: inventory.snapshot_date || null
+    }
+  }];
+}
+
+function akaLoadCentralContext_(metadata) {
+  const periodKey = String(metadata.period_to || '').slice(0, 7);
+  const warnings = [];
+  let monthly = null;
+  let searchMarket = null;
+  let searchMarketReference = null;
+  try {
+    const monthlyResponse = getProductMonthlyData_(metadata.asin, 1, periodKey);
+    monthly = monthlyResponse && Array.isArray(monthlyResponse.points)
+      ? monthlyResponse.points.filter(function(point) { return String(point.period) === periodKey; })[0] || null
+      : null;
+    if (!monthly) warnings.push(akaIssue_(
+      'CENTRAL_MONTHLY_NOT_AVAILABLE',
+      '対象ASIN・月の商品月次データが見つかりません。商品採算guardrailはLIMITEDです。'
+    ));
+  } catch (error) {
+    warnings.push(akaIssue_(
+      'CENTRAL_MONTHLY_NOT_AVAILABLE',
+      '商品月次データを取得できません: ' + String(error && error.message ? error.message : error)
+    ));
+  }
+  try {
+    searchMarketReference = akaLatestSearchMarketReference_(
+      metadata.asin,
+      metadata.marketplace,
+      periodKey
+    );
+    if (!searchMarketReference) throw new Error('広告対象月以前の検索市場データがありません。');
+    searchMarket = getSearchMarketSummary_(
+      metadata.asin,
+      searchMarketReference.reference_period,
+      metadata.marketplace
+    );
+  } catch (error) {
+    warnings.push(akaIssue_(
+      'SEARCH_MARKET_NOT_AVAILABLE',
+      '対象ASINで利用可能な最新検索市場データを取得できません: '
+        + String(error && error.message ? error.message : error)
+    ));
+  }
+  return {
+    period_key: periodKey,
+    monthly: monthly,
+    monthly_scope: 'ASIN_PERIOD_GUARDRAIL_NOT_QUERY_ALLOCATION',
+    search_market: searchMarket,
+    search_market_reference: searchMarketReference,
+    warnings: warnings
+  };
+}
+
+function akaBuildTargetSearchTermJoins_(targetRows, searchRows) {
+  const keywordTargets = targetRows.filter(function(row) {
+    return row.entity_type === 'KEYWORD_TARGET';
+  });
+  const byRaw = {};
+  keywordTargets.forEach(function(row) {
+    if (!byRaw[row.keyword_raw]) byRaw[row.keyword_raw] = [];
+    byRaw[row.keyword_raw].push(row);
+  });
+  return searchRows.map(function(searchRow) {
+    const rawCandidates = byRaw[searchRow.target_keyword_raw] || [];
+    let candidates = rawCandidates.slice();
+    let method = 'UNJOINED';
+    let usability = 'LIMITED';
+    let reason = null;
+    if (searchRow.added_match_type && searchRow.added_match_type !== 'UNKNOWN') {
+      candidates = rawCandidates.filter(function(target) {
+        return target.match_type === searchRow.added_match_type;
+      });
+      if (candidates.length === 1) {
+        method = 'RAW_AND_DECLARED_MATCH_TYPE';
+        usability = 'VALID';
+      } else if (candidates.length > 1) {
+        method = 'AMBIGUOUS';
+        reason = 'DUPLICATE_LOGICAL_TARGET';
+      } else {
+        reason = 'DECLARED_MATCH_TARGET_NOT_FOUND';
+      }
+    } else if (rawCandidates.length === 1) {
+      candidates = rawCandidates;
+      method = 'RAW_UNIQUE_LIMITED';
+      usability = 'LIMITED';
+      reason = 'MATCH_TYPE_NOT_DECLARED';
+    } else if (rawCandidates.length > 1) {
+      candidates = rawCandidates;
+      method = 'AMBIGUOUS';
+      reason = 'MATCH_TYPE_NOT_DECLARED_AND_MULTIPLE_TARGETS';
+    } else {
+      reason = 'TARGET_NOT_FOUND';
+    }
+    const joined = candidates.length === 1 && method !== 'AMBIGUOUS' ? candidates[0] : null;
+    return {
+      search_term_row_number: searchRow.source_row_number,
+      customer_search_term_raw: searchRow.customer_search_term_raw,
+      target_keyword_raw: searchRow.target_keyword_raw,
+      added_match_type: searchRow.added_match_type,
+      method: method,
+      data_usability: joined ? usability : 'LIMITED',
+      target_row_number: joined ? joined.source_row_number : null,
+      target_match_type: joined ? joined.match_type : null,
+      candidate_target_rows: candidates.map(function(row) { return row.source_row_number; }),
+      ambiguity_reason: reason
+    };
+  });
+}
+
+function akaCurrentMarketRows_(searchMarket, periodKey) {
+  if (!searchMarket || !Array.isArray(searchMarket.rows)) return [];
+  return searchMarket.rows.filter(function(row) {
+    return row && row.snapshot
+      && String(row.data_period || row.snapshot.period_key || '') === periodKey
+      && row.comparison_status !== 'LEFT_TOP100';
+  }).map(function(row) {
+    return Object.assign({
+      comparison_status: row.comparison_status,
+      current_rank: row.current_rank,
+      previous_rank: row.previous_rank,
+      rank_change: row.rank_change
+    }, row.snapshot);
+  });
+}
+
+function akaBuildSearchMarketJoins_(searchRows, marketRows) {
+  const byRaw = {};
+  const byNorm = {};
+  marketRows.forEach(function(row) {
+    if (!byRaw[row.search_query_raw]) byRaw[row.search_query_raw] = [];
+    byRaw[row.search_query_raw].push(row);
+    if (!byNorm[row.search_query_normalized]) byNorm[row.search_query_normalized] = [];
+    byNorm[row.search_query_normalized].push(row);
+  });
+  return searchRows.map(function(searchRow) {
+    const rawMatches = byRaw[searchRow.customer_search_term_raw] || [];
+    if (rawMatches.length === 1) {
+      return {
+        search_term_row_number: searchRow.source_row_number,
+        customer_search_term_raw: searchRow.customer_search_term_raw,
+        method: 'RAW_EXACT',
+        data_usability: 'VALID',
+        search_query_raw: rawMatches[0].search_query_raw,
+        market_snapshot: rawMatches[0],
+        ambiguity_reason: null
+      };
+    }
+    if (rawMatches.length > 1) {
+      return {
+        search_term_row_number: searchRow.source_row_number,
+        customer_search_term_raw: searchRow.customer_search_term_raw,
+        method: 'AMBIGUOUS',
+        data_usability: 'LIMITED',
+        search_query_raw: null,
+        market_snapshot: null,
+        ambiguity_reason: 'DUPLICATE_RAW_SEARCH_MARKET_QUERY'
+      };
+    }
+    const normalizedMatches = byNorm[searchRow.customer_search_term_normalized] || [];
+    const collision = normalizedMatches.some(function(row) { return row.normalization_collision; });
+    if (normalizedMatches.length === 1 && !collision) {
+      return {
+        search_term_row_number: searchRow.source_row_number,
+        customer_search_term_raw: searchRow.customer_search_term_raw,
+        method: 'NORMALIZED_UNIQUE',
+        data_usability: 'LIMITED',
+        search_query_raw: normalizedMatches[0].search_query_raw,
+        market_snapshot: normalizedMatches[0],
+        ambiguity_reason: null
+      };
+    }
+    return {
+      search_term_row_number: searchRow.source_row_number,
+      customer_search_term_raw: searchRow.customer_search_term_raw,
+      method: normalizedMatches.length ? 'AMBIGUOUS' : 'UNJOINED',
+      data_usability: 'LIMITED',
+      search_query_raw: null,
+      market_snapshot: null,
+      ambiguity_reason: normalizedMatches.length
+        ? 'NORMALIZED_SEARCH_MARKET_COLLISION'
+        : 'SEARCH_MARKET_QUERY_NOT_FOUND'
+    };
+  });
+}
+
+function akaPriorSelectedCandidates_(previousSession) {
+  const analysis = previousSession && previousSession.analysis;
+  if (!analysis || !Array.isArray(analysis.families)) return [];
+  return [].concat.apply([], analysis.families.map(function(family) {
+    return Array.isArray(family.selected_candidates) ? family.selected_candidates : [];
+  }));
+}
+
+function akaFindAppliedPriorCandidate_(priorCandidates, target) {
+  return priorCandidates.filter(function(candidate) {
+    if (String(candidate.keyword_raw || candidate.search_term_raw || '') !== target.keyword_raw) return false;
+    if (candidate.family === 'NEW_EXACT') {
+      return target.match_type === 'EXACT';
+    }
+    return candidate.proposed_bid_yen !== null
+      && Number(candidate.proposed_bid_yen) === Number(target.current_bid_yen)
+      && String(candidate.match_type || '') === String(target.match_type || '');
+  })[0] || null;
+}
+
+function akaSuggestedRange_(target) {
+  const low = akaNullableNumber_(target.suggested_bid_low_yen);
+  const high = akaNullableNumber_(target.suggested_bid_high_yen);
+  return low !== null && high !== null ? { low: low, high: high } : null;
+}
+
+function akaRaisedBid_(target) {
+  const current = akaNullableNumber_(target.current_bid_yen);
+  if (current === null) return null;
+  let proposed = Math.max(current + 1, Math.round(current * (1 + AKA_POLICY_.bid_raise_step_ratio)));
+  const high = akaNullableNumber_(target.suggested_bid_high_yen);
+  if (high !== null) proposed = Math.min(proposed, high);
+  return proposed > current ? proposed : current;
+}
+
+function akaLoweredBid_(target) {
+  const current = akaNullableNumber_(target.current_bid_yen);
+  if (current === null) return null;
+  let proposed = Math.max(1, Math.round(current * (1 - AKA_POLICY_.bid_lower_step_ratio)));
+  const low = akaNullableNumber_(target.suggested_bid_low_yen);
+  if (low !== null && current >= low) proposed = Math.max(proposed, low);
+  return proposed < current ? proposed : current;
+}
+
+function akaTargetCandidate_(target, central, priorCandidates) {
+  if (target.entity_type !== 'KEYWORD_TARGET') {
+    return akaCandidate_({
+      family: 'DATA_QUALITY',
+      decision: 'NEED_MORE_DATA',
+      keyword_raw: target.keyword_raw,
+      match_type: target.match_type,
+      data_usability: 'INVALID',
+      suppression_reason: 'PRODUCT_OR_UNKNOWN_TARGET_EXCLUDED',
+      facts: [akaFact_('ENTITY_TYPE', target.entity_type, 'TARGET_CSV', 'TARGET_ROW')],
+      missing_information: ['キーワードtargetではないため入札判断対象外'],
+      priority_basis: ['entity_type', 'source_row_number'],
+      priority: [target.entity_type === 'UNKNOWN' ? 0 : 1, target.source_row_number],
+      target_row_number: target.source_row_number,
+      source_row_number: target.source_row_number
+    });
+  }
+  const prior = akaFindAppliedPriorCandidate_(priorCandidates, target);
+  const currentBid = akaNullableNumber_(target.current_bid_yen);
+  const spend = akaNullableNumber_(target.spend_yen);
+  const orders = akaNullableNumber_(target.orders);
+  const sales = akaNullableNumber_(target.sales_yen);
+  const acos = sales !== null && sales > 0 && spend !== null ? spend / sales : null;
+  const baseFacts = [
+    akaFact_('TARGET_STATE', target.state, 'TARGET_CSV', 'TARGET_ROW'),
+    akaFact_('CURRENT_BID_YEN', currentBid, 'TARGET_CSV', 'TARGET_ROW', 'JPY'),
+    akaFact_('SUGGESTED_BID_LOW_YEN', target.suggested_bid_low_yen, 'TARGET_CSV', 'TARGET_ROW', 'JPY'),
+    akaFact_('SUGGESTED_BID_MID_YEN', target.suggested_bid_mid_yen, 'TARGET_CSV', 'TARGET_ROW', 'JPY'),
+    akaFact_('SUGGESTED_BID_HIGH_YEN', target.suggested_bid_high_yen, 'TARGET_CSV', 'TARGET_ROW', 'JPY'),
+    akaFact_('IMPRESSIONS', target.impressions, 'TARGET_CSV', 'TARGET_ROW', 'COUNT'),
+    akaFact_('SPEND_YEN', spend, 'TARGET_CSV', 'TARGET_ROW', 'JPY'),
+    akaFact_('ORDERS', orders, 'TARGET_CSV', 'TARGET_ROW', 'COUNT'),
+    akaFact_('SALES_YEN', sales, 'TARGET_CSV', 'TARGET_ROW', 'JPY'),
+    akaFact_('ACOS', acos, 'CALCULATED', 'TARGET_ROW', 'RATIO'),
+    akaFact_(
+      'PRODUCT_PROFIT_AFTER_AD_YEN',
+      central.monthly ? akaNullableNumber_(central.monthly.profit_after_ad) : null,
+      'CENTRAL_MONTHLY',
+      'ASIN_PERIOD_GUARDRAIL_NOT_QUERY_ALLOCATION',
+      'JPY'
+    )
+  ];
+  if (prior) {
+    baseFacts.push(akaFact_('PREVIOUS_CANDIDATE_ID', prior.candidate_id, 'PRIOR_ANALYSIS_SESSION', 'TARGET_ROW'));
+    return akaCandidate_({
+      family: 'MAINTAIN',
+      decision: 'HOLD',
+      keyword_raw: target.keyword_raw,
+      match_type: target.match_type,
+      current_bid_yen: currentBid,
+      data_usability: 'VALID',
+      execution_status: 'ALREADY_APPLIED',
+      previous_candidate_id: prior.candidate_id,
+      facts: baseFacts,
+      priority_basis: ['already_applied', 'orders_desc', 'sales_desc', 'source_row_number'],
+      priority: [0, -(orders || 0), -(sales || 0), target.source_row_number],
+      target_row_number: target.source_row_number,
+      source_row_number: target.source_row_number
+    });
+  }
+  if (target.state === 'PAUSED') {
+    return akaCandidate_({
+      family: 'MAINTAIN',
+      decision: 'HOLD',
+      keyword_raw: target.keyword_raw,
+      match_type: target.match_type,
+      current_bid_yen: currentBid,
+      data_usability: spend === null || orders === null ? 'LIMITED' : 'VALID',
+      facts: baseFacts,
+      missing_information: ['Clickがないため停止解除・除外の強い判断はしない'],
+      priority_basis: ['paused_state', 'historical_impressions_desc', 'source_row_number'],
+      priority: [0, -(target.impressions || 0), target.source_row_number],
+      target_row_number: target.source_row_number,
+      source_row_number: target.source_row_number
+    });
+  }
+  if (currentBid === null || spend === null || orders === null || sales === null) {
+    return akaCandidate_({
+      family: 'EXISTING_BID',
+      decision: 'NEED_MORE_DATA',
+      keyword_raw: target.keyword_raw,
+      match_type: target.match_type,
+      current_bid_yen: currentBid,
+      data_usability: 'LIMITED',
+      suppression_reason: currentBid === null ? 'CURRENT_BID_MISSING' : null,
+      bid_basis: 'INSUFFICIENT_FOR_NUMERIC_BID',
+      facts: baseFacts,
+      missing_information: ['未報告の広告実績または入札額'],
+      priority_basis: ['missing_information_count', 'source_row_number'],
+      priority: [1, target.source_row_number],
+      target_row_number: target.source_row_number,
+      source_row_number: target.source_row_number
+    });
+  }
+  if (orders <= 0) {
+    if (spend > 0) {
+      return akaCandidate_({
+        family: 'EXISTING_BID',
+        decision: 'NEED_MORE_DATA',
+        keyword_raw: target.keyword_raw,
+        match_type: target.match_type,
+        current_bid_yen: currentBid,
+        data_usability: 'LIMITED',
+        bid_basis: 'INSUFFICIENT_FOR_NUMERIC_BID',
+        facts: baseFacts,
+        missing_information: ['Click', 'CPC', 'CTR', '広告CVR'],
+        priority_basis: ['spend_desc', 'impressions_desc', 'source_row_number'],
+        priority: [1, -spend, -(target.impressions || 0), target.source_row_number],
+        target_row_number: target.source_row_number,
+        source_row_number: target.source_row_number
+      });
+    }
+    return akaCandidate_({
+      family: 'MAINTAIN',
+      decision: 'HOLD',
+      keyword_raw: target.keyword_raw,
+      match_type: target.match_type,
+      current_bid_yen: currentBid,
+      data_usability: 'LIMITED',
+      facts: baseFacts,
+      missing_information: ['費用・注文実績がないため入札変更の効果を判断できない'],
+      priority_basis: ['impressions_desc', 'source_row_number'],
+      priority: [1, -(target.impressions || 0), target.source_row_number],
+      target_row_number: target.source_row_number,
+      source_row_number: target.source_row_number
+    });
+  }
+
+  const profitAfterAd = central.monthly ? akaNullableNumber_(central.monthly.profit_after_ad) : null;
+  const targetAcos = akaNullableNumber_(central.target_acos);
+  const shouldLower = (targetAcos !== null && acos !== null && acos > targetAcos)
+    || (profitAfterAd !== null && profitAfterAd <= 0);
+  const proposed = shouldLower ? akaLoweredBid_(target) : akaRaisedBid_(target);
+  const decision = proposed === currentBid ? 'HOLD' : (shouldLower ? 'LOWER_TEST' : 'RAISE_TEST');
+  const directionReasons = [];
+  if (targetAcos !== null && acos !== null) {
+    directionReasons.push(acos > targetAcos
+      ? 'ACOS_ABOVE_USER_TARGET'
+      : 'ACOS_AT_OR_BELOW_USER_TARGET');
+  }
+  if (orders > 0) directionReasons.push('ORDERS_OBSERVED');
+  if (profitAfterAd !== null) {
+    directionReasons.push(profitAfterAd > 0
+      ? 'PRODUCT_PROFIT_AFTER_AD_POSITIVE'
+      : 'PRODUCT_PROFIT_AFTER_AD_NON_POSITIVE');
+  }
+  if (decision === 'HOLD') directionReasons.push('REFERENCE_BID_BOUNDARY_REACHED');
+  return akaCandidate_({
+    family: 'EXISTING_BID',
+    decision: decision,
+    direction_reason_codes: directionReasons,
+    keyword_raw: target.keyword_raw,
+    match_type: target.match_type,
+    current_bid_yen: currentBid,
+    proposed_bid_yen: decision === 'HOLD' ? null : proposed,
+    proposed_bid_range_yen: akaSuggestedRange_(target),
+    bid_basis: 'CURRENT_BID_SMALL_STEP',
+    data_usability: 'VALID',
+    facts: baseFacts.concat([
+      akaFact_('USER_TARGET_ACOS', targetAcos, 'USER_CONFIRMED_METADATA', 'ASIN_PERIOD', 'RATIO')
+    ]),
+    priority_basis: ['decision_class', 'orders_desc', 'sales_desc', 'spend_desc', 'source_row_number'],
+    priority: [decision === 'HOLD' ? 2 : 0, -orders, -sales, -spend, target.source_row_number],
+    target_row_number: target.source_row_number,
+    source_row_number: target.source_row_number
+  });
+}
+
+function akaNewExactCandidate_(
+  searchRow,
+  targetJoin,
+  marketJoin,
+  exactByRaw,
+  exactByNorm,
+  priorCandidates
+) {
+  const raw = searchRow.customer_search_term_raw;
+  const existingExact = exactByRaw[raw] || [];
+  const previousNew = priorCandidates.filter(function(candidate) {
+    return candidate.family === 'NEW_EXACT'
+      && String(candidate.search_term_raw || candidate.keyword_raw || '') === raw;
+  })[0] || null;
+  if (existingExact.length) {
+    if (previousNew) {
+      return akaCandidate_({
+        family: 'MAINTAIN',
+        decision: 'HOLD',
+        keyword_raw: raw,
+        search_term_raw: raw,
+        match_type: 'EXACT',
+        current_bid_yen: existingExact[0].current_bid_yen,
+        data_usability: 'VALID',
+        execution_status: 'ALREADY_APPLIED',
+        previous_candidate_id: previousNew.candidate_id,
+        facts: [akaFact_('EXACT_TARGET_PRESENT', true, 'TARGET_CSV', 'SESSION')],
+        priority_basis: ['already_applied', 'orders_desc', 'source_row_number'],
+        priority: [0, -(searchRow.orders || 0), searchRow.source_row_number],
+        target_row_number: existingExact[0].source_row_number,
+        search_term_row_number: searchRow.source_row_number,
+        source_row_number: searchRow.source_row_number,
+        join: targetJoin
+      });
+    }
+    return akaCandidate_({
+      family: 'NEW_EXACT',
+      decision: 'ADD_EXACT',
+      keyword_raw: raw,
+      search_term_raw: raw,
+      match_type: 'EXACT',
+      data_usability: 'INVALID',
+      suppression_reason: 'EXACT_TARGET_ALREADY_EXISTS',
+      facts: [akaFact_('EXACT_TARGET_PRESENT', true, 'TARGET_CSV', 'SESSION')],
+      priority_basis: ['existing_exact_guard', 'source_row_number'],
+      priority: [9, searchRow.source_row_number],
+      target_row_number: existingExact[0].source_row_number,
+      search_term_row_number: searchRow.source_row_number,
+      source_row_number: searchRow.source_row_number,
+      join: targetJoin
+    });
+  }
+  const normalizedMatches = exactByNorm[searchRow.customer_search_term_normalized] || [];
+  if (normalizedMatches.length) {
+    return akaCandidate_({
+      family: 'NEW_EXACT',
+      decision: 'NEED_MORE_DATA',
+      keyword_raw: raw,
+      search_term_raw: raw,
+      match_type: 'EXACT',
+      data_usability: 'LIMITED',
+      suppression_reason: 'NORMALIZED_EXACT_TARGET_COLLISION_REVIEW',
+      facts: [akaFact_(
+        'NORMALIZED_EXISTING_EXACT_RAW_VALUES',
+        normalizedMatches.map(function(row) { return row.keyword_raw; }),
+        'TARGET_CSV',
+        'SESSION'
+      )],
+      missing_information: ['原文差を維持したまま既存targetとの意図差を確認'],
+      priority_basis: ['normalization_guard', 'orders_desc', 'source_row_number'],
+      priority: [8, -(searchRow.orders || 0), searchRow.source_row_number],
+      search_term_row_number: searchRow.source_row_number,
+      source_row_number: searchRow.source_row_number,
+      join: targetJoin
+    });
+  }
+  const spend = akaNullableNumber_(searchRow.spend_yen);
+  const orders = akaNullableNumber_(searchRow.orders);
+  const sales = akaNullableNumber_(searchRow.sales_yen);
+  const relatedBid = akaNullableNumber_(searchRow.target_bid_yen);
+  const market = marketJoin && marketJoin.market_snapshot;
+  const facts = [
+    akaFact_('SEARCH_TERM_SPEND_YEN', spend, 'SEARCH_TERM_CSV', 'SEARCH_TERM_ROW', 'JPY'),
+    akaFact_('SEARCH_TERM_ORDERS', orders, 'SEARCH_TERM_CSV', 'SEARCH_TERM_ROW', 'COUNT'),
+    akaFact_('SEARCH_TERM_SALES_YEN', sales, 'SEARCH_TERM_CSV', 'SEARCH_TERM_ROW', 'JPY'),
+    akaFact_('RELATED_TARGET_BID_YEN', relatedBid, 'SEARCH_TERM_CSV', 'SEARCH_TERM_ROW', 'JPY'),
+    akaFact_(
+      'SEARCH_MARKET_REFERENCE_PERIOD',
+      market ? market.period_key : null,
+      'SEARCH_MARKET',
+      'SEARCH_QUERY'
+    ),
+    akaFact_('MARKET_PURCHASE', market ? market.purchase_total : null, 'SEARCH_MARKET', 'SEARCH_QUERY', 'COUNT'),
+    akaFact_('ASIN_PURCHASE', market ? market.purchase_asin : null, 'SEARCH_MARKET', 'SEARCH_QUERY', 'COUNT')
+  ];
+  if (orders === null || spend === null || sales === null) {
+    return akaCandidate_({
+      family: 'NEW_EXACT',
+      decision: 'NEED_MORE_DATA',
+      keyword_raw: raw,
+      search_term_raw: raw,
+      match_type: 'EXACT',
+      data_usability: 'LIMITED',
+      suppression_reason: 'SEARCH_TERM_PERFORMANCE_MISSING',
+      bid_basis: 'INSUFFICIENT_FOR_NUMERIC_BID',
+      facts: facts,
+      missing_information: ['検索用語の費用・注文・売上'],
+      priority_basis: ['orders_desc', 'sales_desc', 'source_row_number'],
+      priority: [2, 0, 0, searchRow.source_row_number],
+      search_term_row_number: searchRow.source_row_number,
+      source_row_number: searchRow.source_row_number,
+      join: targetJoin
+    });
+  }
+  if (orders <= 0) {
+    return akaCandidate_({
+      family: 'NEW_EXACT',
+      decision: 'NEED_MORE_DATA',
+      keyword_raw: raw,
+      search_term_raw: raw,
+      match_type: 'EXACT',
+      data_usability: 'LIMITED',
+      suppression_reason: 'NO_ORDER_EVIDENCE',
+      bid_basis: 'INSUFFICIENT_FOR_NUMERIC_BID',
+      facts: facts,
+      missing_information: ['注文実績または検索意図の確認'],
+      priority_basis: ['spend_desc', 'source_row_number'],
+      priority: [3, -spend, searchRow.source_row_number],
+      search_term_row_number: searchRow.source_row_number,
+      source_row_number: searchRow.source_row_number,
+      join: targetJoin
+    });
+  }
+  const proposed = relatedBid === null ? null : Math.max(1, Math.round(relatedBid * 0.9));
+  return akaCandidate_({
+    family: 'NEW_EXACT',
+    decision: proposed === null ? 'NEED_MORE_DATA' : 'ADD_EXACT',
+    direction_reason_codes: proposed === null ? [] : [
+      'SEARCH_TERM_ORDERS_OBSERVED',
+      'SEARCH_TERM_SALES_OBSERVED',
+      'RELATED_TARGET_BID_AVAILABLE'
+    ],
+    keyword_raw: raw,
+    search_term_raw: raw,
+    match_type: 'EXACT',
+    proposed_bid_yen: proposed,
+    bid_basis: proposed === null ? 'INSUFFICIENT_FOR_NUMERIC_BID' : 'PROVEN_RELATED_TARGET',
+    data_usability: marketJoin && marketJoin.data_usability === 'VALID' ? 'VALID' : 'LIMITED',
+    facts: facts,
+    missing_information: proposed === null ? ['数値入札の参照値'] : [],
+    suppression_reason: proposed === null ? 'NUMERIC_BID_REFERENCE_MISSING' : null,
+    priority_basis: ['orders_desc', 'sales_desc', 'market_purchase_desc', 'source_row_number'],
+    priority: [0, -orders, -sales, -(market ? market.purchase_total || 0 : 0), searchRow.source_row_number],
+    search_term_row_number: searchRow.source_row_number,
+    source_row_number: searchRow.source_row_number,
+    join: targetJoin
+  });
+}
+
+function akaNegativeCandidate_(searchRow, targetJoin, marketJoin) {
+  const spend = akaNullableNumber_(searchRow.spend_yen);
+  const orders = akaNullableNumber_(searchRow.orders);
+  if (spend === null || spend <= 0 || orders === null || orders > 0) return null;
+  return akaCandidate_({
+    family: 'NEGATIVE_REVIEW',
+    decision: 'PAUSE_REVIEW',
+    keyword_raw: searchRow.target_keyword_raw,
+    search_term_raw: searchRow.customer_search_term_raw,
+    match_type: searchRow.added_match_type || 'UNKNOWN',
+    current_bid_yen: searchRow.target_bid_yen,
+    data_usability: 'LIMITED',
+    suppression_reason: 'MISSING_CLICK_METRICS_AND_INTENT_EVIDENCE',
+    bid_basis: 'INSUFFICIENT_FOR_NUMERIC_BID',
+    facts: [
+      akaFact_('SEARCH_TERM_SPEND_YEN', spend, 'SEARCH_TERM_CSV', 'SEARCH_TERM_ROW', 'JPY'),
+      akaFact_('SEARCH_TERM_ORDERS', orders, 'SEARCH_TERM_CSV', 'SEARCH_TERM_ROW', 'COUNT'),
+      akaFact_(
+        'ASIN_PURCHASE',
+        marketJoin && marketJoin.market_snapshot ? marketJoin.market_snapshot.purchase_asin : null,
+        'SEARCH_MARKET',
+        'SEARCH_QUERY',
+        'COUNT'
+      )
+    ],
+    missing_information: ['Click', 'CPC', '検索意図不一致の確認'],
+    priority_basis: ['spend_desc', 'market_purchase_asc', 'source_row_number'],
+    priority: [-spend, marketJoin && marketJoin.market_snapshot
+      ? marketJoin.market_snapshot.purchase_asin || 0 : 0, searchRow.source_row_number],
+    search_term_row_number: searchRow.source_row_number,
+    source_row_number: searchRow.source_row_number,
+    join: targetJoin
+  });
+}
+
+function akaMarketOnlyNewExactCandidates_(marketRows, searchRows, exactByRaw, exactByNorm) {
+  const observed = {};
+  searchRows.forEach(function(row) { observed[row.customer_search_term_raw] = true; });
+  return marketRows.filter(function(row) {
+    return !observed[row.search_query_raw] && Number(row.purchase_asin || 0) > 0;
+  }).map(function(row) {
+    const exact = exactByRaw[row.search_query_raw] || [];
+    const normalized = exactByNorm[row.search_query_normalized] || [];
+    let reason = 'SEARCH_TERM_PERFORMANCE_NOT_OBSERVED';
+    if (exact.length) reason = 'EXACT_TARGET_ALREADY_EXISTS';
+    else if (normalized.length || row.normalization_collision) reason = 'NORMALIZED_EXACT_TARGET_COLLISION_REVIEW';
+    return akaCandidate_({
+      family: 'NEW_EXACT',
+      decision: 'NEED_MORE_DATA',
+      keyword_raw: row.search_query_raw,
+      search_term_raw: row.search_query_raw,
+      match_type: 'EXACT',
+      data_usability: 'LIMITED',
+      suppression_reason: reason,
+      bid_basis: 'INSUFFICIENT_FOR_NUMERIC_BID',
+      facts: [
+        akaFact_('SEARCH_MARKET_REFERENCE_PERIOD', row.period_key, 'SEARCH_MARKET', 'SEARCH_QUERY'),
+        akaFact_('SEARCH_QUERY_RANK', row.search_query_rank, 'SEARCH_MARKET', 'SEARCH_QUERY', 'RANK'),
+        akaFact_('SEARCH_QUERY_VOLUME', row.search_query_volume, 'SEARCH_MARKET', 'SEARCH_QUERY', 'COUNT'),
+        akaFact_('MARKET_PURCHASE', row.purchase_total, 'SEARCH_MARKET', 'SEARCH_QUERY', 'COUNT'),
+        akaFact_('ASIN_PURCHASE', row.purchase_asin, 'SEARCH_MARKET', 'SEARCH_QUERY', 'COUNT'),
+        akaFact_('PURCHASE_SHARE', row.purchase_share, 'SEARCH_MARKET', 'SEARCH_QUERY', 'RATIO')
+      ],
+      missing_information: ['広告検索用語の費用・注文・売上', '検索意図の確認'],
+      priority_basis: ['asin_purchase_desc', 'market_purchase_desc', 'rank_asc', 'query_raw'],
+      priority: [-(row.purchase_asin || 0), -(row.purchase_total || 0), row.search_query_rank || 999999, row.search_query_raw],
+      search_market_query_raw: row.search_query_raw,
+      source_row_number: row.search_query_rank || row.search_query_raw
+    });
+  });
+}
+
+function akaDataQualityCandidates_(prepared, targetJoins, marketJoins, central) {
+  const candidates = [
+    akaCandidate_({
+      family: 'DATA_QUALITY',
+      decision: 'NEED_MORE_DATA',
+      keyword_raw: '',
+      match_type: 'UNKNOWN',
+      data_usability: 'LIMITED',
+      facts: [
+        akaFact_('FILE_SCOPE_STATUS', prepared.preview.metadata.file_scope_status, 'IMPORT_METADATA', 'SESSION'),
+        akaFact_('UNIVERSE_COVERAGE', prepared.preview.metadata.universe_coverage, 'IMPORT_METADATA', 'SESSION')
+      ],
+      missing_information: ['広告アカウント・キャンペーン全体に対するcoverage'],
+      priority_basis: ['coverage_unknown'],
+      priority: [4],
+      source_row_number: 'coverage'
+    })
+  ];
+  targetJoins.filter(function(join) {
+    return join.method === 'AMBIGUOUS' || join.method === 'UNJOINED';
+  }).forEach(function(join) {
+    candidates.push(akaCandidate_({
+      family: 'DATA_QUALITY',
+      decision: 'NEED_MORE_DATA',
+      keyword_raw: join.target_keyword_raw,
+      search_term_raw: join.customer_search_term_raw,
+      match_type: join.added_match_type || 'UNKNOWN',
+      data_usability: 'LIMITED',
+      facts: [akaFact_('TARGET_JOIN_METHOD', join.method, 'DETERMINISTIC_JOIN', 'SEARCH_TERM_ROW')],
+      missing_information: ['campaign / ad group / target IDまたは一意なmatch type'],
+      suppression_reason: join.ambiguity_reason,
+      priority_basis: ['ambiguous_join', 'source_row_number'],
+      priority: [0, join.search_term_row_number],
+      search_term_row_number: join.search_term_row_number,
+      source_row_number: 'target-join-' + join.search_term_row_number,
+      join: join
+    }));
+  });
+  marketJoins.filter(function(join) {
+    return join.method === 'AMBIGUOUS';
+  }).forEach(function(join) {
+    candidates.push(akaCandidate_({
+      family: 'DATA_QUALITY',
+      decision: 'NEED_MORE_DATA',
+      keyword_raw: join.customer_search_term_raw,
+      search_term_raw: join.customer_search_term_raw,
+      match_type: 'UNKNOWN',
+      data_usability: 'LIMITED',
+      facts: [akaFact_('SEARCH_MARKET_JOIN_METHOD', join.method, 'DETERMINISTIC_JOIN', 'SEARCH_TERM_ROW')],
+      missing_information: ['raw完全一致する検索市場query'],
+      suppression_reason: join.ambiguity_reason,
+      priority_basis: ['normalization_collision', 'source_row_number'],
+      priority: [1, join.search_term_row_number],
+      search_term_row_number: join.search_term_row_number,
+      source_row_number: 'market-join-' + join.search_term_row_number,
+      join: join
+    }));
+  });
+  central.warnings.forEach(function(warning, index) {
+    candidates.push(akaCandidate_({
+      family: 'DATA_QUALITY',
+      decision: 'NEED_MORE_DATA',
+      keyword_raw: '',
+      match_type: 'UNKNOWN',
+      data_usability: 'LIMITED',
+      facts: [akaFact_(warning.code, warning.message, 'CENTRAL_JOIN', 'ASIN_PERIOD')],
+      missing_information: [warning.message],
+      priority_basis: ['central_join_warning', 'warning_index'],
+      priority: [2, index],
+      source_row_number: 'central-' + index
+    }));
+  });
+  return candidates;
+}
+
+function akaComparePriority_(left, right) {
+  const a = left._priority || [];
+  const b = right._priority || [];
+  const length = Math.max(a.length, b.length);
+  for (let index = 0; index < length; index++) {
+    const av = a[index] === undefined ? '' : a[index];
+    const bv = b[index] === undefined ? '' : b[index];
+    if (av === bv) continue;
+    if (typeof av === 'number' && typeof bv === 'number') return av - bv;
+    return String(av).localeCompare(String(bv), 'ja');
+  }
+  return left.candidate_id.localeCompare(right.candidate_id);
+}
+
+function akaSelectWithinFamilies_(candidates) {
+  const familyOrder = ['EXISTING_BID', 'NEW_EXACT', 'NEGATIVE_REVIEW', 'MAINTAIN', 'DATA_QUALITY'];
+  return familyOrder.map(function(familyName) {
+    const familyCandidates = candidates.filter(function(candidate) {
+      return candidate.family === familyName;
+    }).sort(akaComparePriority_);
+    const limit = AKA_POLICY_.family_selection_limits[familyName] || 0;
+    let selectedCount = 0;
+    familyCandidates.forEach(function(candidate) {
+      if (!candidate.suppression_reason && candidate.data_usability !== 'INVALID' && selectedCount < limit) {
+        selectedCount++;
+        candidate.selected = true;
+        candidate.selection_reason = {
+          code: 'LEXICOGRAPHIC_WITHIN_FAMILY',
+          family_rank: selectedCount,
+          basis: candidate.priority_basis
+        };
+      } else if (!candidate.suppression_reason) {
+        candidate.suppression_reason = limit === 0 ? 'FAMILY_DISABLED_IN_POLICY_V0' : 'FAMILY_SELECTION_LIMIT';
+      }
+      delete candidate._priority;
+    });
+    return {
+      family: familyName,
+      selection_limit: limit,
+      selected_candidates: familyCandidates.filter(function(candidate) { return candidate.selected; }),
+      suppressed_candidates: familyCandidates.filter(function(candidate) { return !candidate.selected; })
+    };
+  });
+}
+
+function analyzeAdvertisingKeywordSnapshot_(prepared, centralInput, previousSession) {
+  const targetRows = prepared.preview.reports.target
+    ? prepared.preview.reports.target.rows : [];
+  const searchRows = prepared.preview.reports.search_term
+    ? prepared.preview.reports.search_term.rows : [];
+  const central = centralInput || akaLoadCentralContext_(prepared.preview.metadata);
+  central.target_acos = prepared.preview.metadata.target_acos;
+  const searchMarketReference = central.search_market_reference || (central.search_market ? {
+    rule: AKA_POLICY_.search_market_reference_rule,
+    advertising_period: central.period_key,
+    reference_period: central.search_market.period_key,
+    lag_months: akaMonthDistance_(central.search_market.period_key, central.period_key),
+    is_same_period: String(central.search_market.period_key) === String(central.period_key)
+  } : null);
+  const marketRows = akaCurrentMarketRows_(
+    central.search_market,
+    searchMarketReference ? searchMarketReference.reference_period : central.period_key
+  );
+  const targetJoins = akaBuildTargetSearchTermJoins_(targetRows, searchRows);
+  const marketJoins = akaBuildSearchMarketJoins_(searchRows, marketRows);
+  const targetJoinByRow = {};
+  const marketJoinByRow = {};
+  targetJoins.forEach(function(join) { targetJoinByRow[join.search_term_row_number] = join; });
+  marketJoins.forEach(function(join) { marketJoinByRow[join.search_term_row_number] = join; });
+  const exactByRaw = {};
+  const exactByNorm = {};
+  targetRows.filter(function(row) {
+    return row.entity_type === 'KEYWORD_TARGET' && row.match_type === 'EXACT';
+  }).forEach(function(row) {
+    if (!exactByRaw[row.keyword_raw]) exactByRaw[row.keyword_raw] = [];
+    exactByRaw[row.keyword_raw].push(row);
+    if (!exactByNorm[row.keyword_normalized]) exactByNorm[row.keyword_normalized] = [];
+    exactByNorm[row.keyword_normalized].push(row);
+  });
+  const priorCandidates = akaPriorSelectedCandidates_(previousSession);
+  let candidates = targetRows.map(function(target) {
+    return akaTargetCandidate_(target, central, priorCandidates);
+  });
+  searchRows.forEach(function(searchRow) {
+    const targetJoin = targetJoinByRow[searchRow.source_row_number] || null;
+    const marketJoin = marketJoinByRow[searchRow.source_row_number] || null;
+    candidates.push(akaNewExactCandidate_(
+      searchRow,
+      targetJoin,
+      marketJoin,
+      exactByRaw,
+      exactByNorm,
+      priorCandidates
+    ));
+    const negative = akaNegativeCandidate_(searchRow, targetJoin, marketJoin);
+    if (negative) candidates.push(negative);
+  });
+  candidates = candidates.concat(
+    akaMarketOnlyNewExactCandidates_(marketRows, searchRows, exactByRaw, exactByNorm)
+  );
+  candidates = candidates.concat(
+    akaDataQualityCandidates_(prepared, targetJoins, marketJoins, central)
+  );
+  const operationalCautions = akaOperationalCautions_(central);
+  candidates.forEach(function(candidate) {
+    if (candidate.bid_direction === 'RAISE' || candidate.bid_direction === 'ADD') {
+      candidate.operational_cautions = operationalCautions.slice();
+    }
+  });
+  const families = akaSelectWithinFamilies_(candidates);
+  const selectedCount = families.reduce(function(total, family) {
+    return total + family.selected_candidates.length;
+  }, 0);
+  const suppressedCount = families.reduce(function(total, family) {
+    return total + family.suppressed_candidates.length;
+  }, 0);
+  return {
+    schema_version: AKA_ANALYSIS_SCHEMA_VERSION_,
+    policy: JSON.parse(JSON.stringify(AKA_POLICY_)),
+    selection_scope: AKA_POLICY_.selection_scope,
+    cross_family_ranking: false,
+    central_context: {
+      period_key: central.period_key,
+      monthly: central.monthly,
+      monthly_scope: central.monthly_scope,
+      operational_cautions: operationalCautions,
+      search_market_reference: searchMarketReference,
+      search_market: central.search_market ? {
+        marketplace: central.search_market.marketplace,
+        asin: central.search_market.asin,
+        period_key: central.search_market.period_key,
+        report_scope: central.search_market.report_scope,
+        query_limit: central.search_market.query_limit,
+        returned_query_count: central.search_market.returned_query_count,
+        current_query_count: central.search_market.current_query_count
+      } : null,
+      warnings: central.warnings
+    },
+    data_usability: {
+      target_search_term_join: targetRows.length && searchRows.length
+        ? (targetJoins.some(function(join) { return join.data_usability !== 'VALID'; }) ? 'LIMITED' : 'VALID')
+        : 'INVALID',
+      search_market_join: searchRows.length && central.search_market ? (
+        marketJoins.some(function(join) { return join.data_usability !== 'VALID'; }) ? 'LIMITED' : 'VALID'
+      ) : (searchRows.length ? 'LIMITED' : 'INVALID'),
+      central_monthly: central.monthly ? 'VALID' : 'LIMITED',
+      negative_decision: 'LIMITED'
+    },
+    joins: {
+      target_search_term: targetJoins,
+      search_term_search_market: marketJoins,
+      target_identity_rule: 'SESSION_ROW_AND_RAW_MATCH_TYPE',
+      search_market_identity_rule: 'RAW_EXACT_THEN_NORMALIZED_UNIQUE',
+      search_market_period_rule: AKA_POLICY_.search_market_reference_rule,
+      monthly_allocation_rule: 'ASIN_PERIOD_GUARDRAIL_NOT_QUERY_ALLOCATION'
+    },
+    selected_count: selectedCount,
+    suppressed_count: suppressedCount,
+    families: families
+  };
+}
+
 function akaSubfolder_(parent, name) {
   const iterator = parent.getFoldersByName(name);
   return iterator.hasNext() ? iterator.next() : parent.createFolder(name);
@@ -761,7 +1786,7 @@ function akaAppendSessionIndex_(session) {
     search_term_file_sha256: session.preview.metadata.search_term_file_sha256 || '',
     target_row_count: session.preview.metadata.returned_target_count,
     search_term_row_count: session.preview.metadata.returned_search_term_count,
-    selected_candidate_count: 0,
+    selected_candidate_count: session.selected_candidate_count || 0,
     policy_version: session.policy_version,
     parser_version: session.preview.parser_version,
     result_drive_file_id: session.result_drive_file_id,
@@ -774,9 +1799,35 @@ function akaAppendSessionIndex_(session) {
   }));
 }
 
+function akaLatestPriorSession_(asinValue) {
+  const asin = String(asinValue || '').trim().toUpperCase();
+  const ref = akaEnsureSessionSheet_();
+  const values = ref.sheet.getDataRange().getValues();
+  if (values.length < 2) return null;
+  const index = {};
+  ref.headers.forEach(function(header, column) { index[header] = column; });
+  const candidates = values.slice(1).filter(function(row) {
+    return String(row[index.asin] || '').trim().toUpperCase() === asin
+      && String(row[index.result_drive_file_id] || '').trim();
+  }).sort(function(left, right) {
+    return String(right[index.updated_at] || '').localeCompare(String(left[index.updated_at] || ''));
+  });
+  if (!candidates.length) return null;
+  try {
+    const fileId = String(candidates[0][index.result_drive_file_id]);
+    return JSON.parse(DriveApp.getFileById(fileId).getBlob().getDataAsString('UTF-8'));
+  } catch (error) {
+    Logger.log('akaLatestPriorSession_: ' + error.message);
+    return null;
+  }
+}
+
 function runAdvertisingKeywordAnalysis(request) {
   // 書込み前に全ファイルを再parse・SHA検証する。invalid入力はDrive/Sheetへ一切保存しない。
   const prepared = akaPrepare_(request);
+  const central = akaLoadCentralContext_(prepared.preview.metadata);
+  const previousSession = akaLatestPriorSession_(prepared.preview.metadata.asin);
+  const analysis = analyzeAdvertisingKeywordSnapshot_(prepared, central, previousSession);
   const lock = LockService.getScriptLock();
   lock.waitLock(30000);
   let sessionFolder = null;
@@ -807,13 +1858,14 @@ function runAdvertisingKeywordAnalysis(request) {
     const session = {
       schema_version: AKA_SESSION_SCHEMA_VERSION_,
       session_id: sessionId,
-      status: 'SNAPSHOT_SAVED',
+      status: 'ANALYZED',
       preview: prepared.preview,
+      analysis: analysis,
       target_file_id: targetFileId,
       search_term_file_id: searchFileId,
       result_drive_file_id: '',
-      selected_candidate_count: 0,
-      policy_version: 'NOT_RUN_PR_AK2',
+      selected_candidate_count: analysis.selected_count,
+      policy_version: AKA_POLICY_VERSION_,
       created_at: now,
       updated_at: now,
       audit: {
@@ -826,7 +1878,7 @@ function runAdvertisingKeywordAnalysis(request) {
     const resultFile = sessionFolder.createFile(Utilities.newBlob(
       JSON.stringify(session),
       'application/json',
-      'parsed_snapshot.json'
+      'analysis_session.json'
     ));
     session.result_drive_file_id = resultFile.getId();
     resultFile.setContent(JSON.stringify(session));
