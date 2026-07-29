@@ -1848,22 +1848,38 @@ function addReorderRecord(productId, reorderData) {
   const sheet = getSheetByName_(SHEET_REORDER_HISTORY, REQUIRED_HEADERS_REORDER);
   const recordId = Utilities.getUuid();
   const now = new Date().toISOString();
+  const lastColumn = Math.max(sheet.getLastColumn(), 1);
+  const headers = sheet.getRange(1, 1, 1, lastColumn).getValues()[0]
+    .map(function(header) { return String(header || '').trim(); });
+  const missingHeaders = REQUIRED_HEADERS_REORDER.filter(function(header) {
+    return headers.indexOf(header) < 0;
+  });
+  if (missingHeaders.length) {
+    throw new Error('reorder_history required headers missing: ' + missingHeaders.join(', '));
+  }
+  const duplicateHeaders = headers.filter(function(header, index) {
+    return header && headers.indexOf(header) !== index;
+  });
+  if (duplicateHeaders.length) {
+    throw new Error('reorder_history duplicate headers: ' + Array.from(new Set(duplicateHeaders)).join(', '));
+  }
 
-  sheet.appendRow([
-    recordId,
-    productId,
-    reorderData.sku || '',  // ← 追加
-    reorderData.order_date,
-    reorderData.quantity,
-    reorderData.unit_price_1688 || null,
-    reorderData.landed_cost_actual,
-    reorderData.lead_time_days || null,
-    reorderData.expected_arrival_date || null,
-    reorderData.fba_fee_at_order || null,
-    reorderData.selling_price_at_order || null,
-    reorderData.notes || '',
-    now
-  ]);
+  const record = {
+    id: recordId,
+    product_id: productId,
+    sku: reorderData.sku || '',
+    order_date: reorderData.order_date,
+    quantity: reorderData.quantity,
+    unit_price_1688: reorderData.unit_price_1688 || null,
+    landed_cost_actual: reorderData.landed_cost_actual,
+    lead_time_days: reorderData.lead_time_days || null,
+    expected_arrival_date: reorderData.expected_arrival_date || null,
+    fba_fee_at_order: reorderData.fba_fee_at_order || null,
+    selling_price_at_order: reorderData.selling_price_at_order || null,
+    notes: reorderData.notes || '',
+    created_at: now
+  };
+  sheet.appendRow(buildRowFromHeaders_(headers, record, [], [], []));
 
   updateProductCurrentLandedCost(productId, reorderData.landed_cost_actual);
 
